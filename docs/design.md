@@ -85,32 +85,6 @@ context.step("name", Type.class, supplier,
         .build());
 ```
 
-**Custom SerDes Interface:**
-```java
-public interface SerDes {
-    String serialize(Object value);
-    <T> T deserialize(String data, Class<T> type);
-    <T> T deserialize(String data, TypeToken<T> typeToken);
-}
-```
-
-**TypeToken and Type Erasure:**
-
-Java's type erasure removes generic type parameters at runtime (`List<User>` becomes `List`). This is problematic for deserialization—Jackson needs the full type to reconstruct objects correctly.
-
-`TypeToken<T>` solves this by capturing generic types at compile time. Creating `new TypeToken<List<User>>() {}` produces an anonymous subclass whose superclass type parameter is preserved in bytecode and accessible via reflection (`getGenericSuperclass()`).
-
-The `SerDes` interface provides both `Class<T>` and `TypeToken<T>` overloads:
-- Use `Class<T>` for simple types: `String.class`, `User.class`
-- Use `TypeToken<T>` for parameterized types: `new TypeToken<List<User>>() {}`
-
-**Custom RetryStrategy Interface:**
-```java
-@FunctionalInterface
-public interface RetryStrategy {
-    RetryDecision makeRetryDecision(Throwable error, int attemptNumber);
-}
-```
 ---
 
 ## Architecture
@@ -411,6 +385,29 @@ Implementations:
 
 For production customization, use `DurableConfig.builder().withLambdaClient(lambdaClient)`.
 For testing, use `DurableConfig.builder().withDurableExecutionClient(localMemoryClient)`.
+
+---
+
+## Custom SerDes and TypeToken
+
+**Custom SerDes Interface:**
+```java
+public interface SerDes {
+    String serialize(Object value);
+    <T> T deserialize(String data, Class<T> type);
+    <T> T deserialize(String data, TypeToken<T> typeToken);
+}
+```
+
+**TypeToken and Type Erasure:**
+
+Java's type erasure removes generic type parameters at runtime (`List<User>` becomes `List`). This is problematic for deserialization—Jackson needs the full type to reconstruct objects correctly.
+
+`TypeToken<T>` solves this by capturing generic types at compile time. Creating `new TypeToken<List<User>>() {}` produces an anonymous subclass whose superclass type parameter is preserved in bytecode and accessible via reflection (`getGenericSuperclass()`).
+
+The `SerDes` interface provides both `Class<T>` and `TypeToken<T>` overloads:
+- Use `Class<T>` for simple types: `String.class`, `User.class`
+- Use `TypeToken<T>` for parameterized types: `new TypeToken<List<User>>() {}`
 
 ---
 
