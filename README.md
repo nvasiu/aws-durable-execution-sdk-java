@@ -64,7 +64,7 @@ public class OrderProcessor extends DurableHandler<Order, OrderResult> {
 
 ### step() – Execute with Checkpointing
 
-Steps execute your code and checkpoint the result. On replay, cached results are returned without re-execution.
+Steps execute your code and checkpoint the result. On replay, results from completed checkpoints are returned without re-execution.
 
 ```java
 // Basic step (blocks until complete)
@@ -83,7 +83,7 @@ See [Step Configuration](#step-configuration) for retry strategies, delivery sem
 
 ### stepAsync() and DurableFuture – Concurrent Operations
 
-`stepAsync()` starts a step in the background and returns a `DurableFuture<T>` immediately. This enables concurrent execution patterns.
+`stepAsync()` starts a step in the background and returns a `DurableFuture<T>`. This enables concurrent execution patterns.
 
 ```java
 // Start multiple operations concurrently
@@ -92,7 +92,7 @@ DurableFuture<User> userFuture = ctx.stepAsync("fetch-user", User.class,
 DurableFuture<List<Order>> ordersFuture = ctx.stepAsync("fetch-orders", 
     new TypeToken<List<Order>>() {}, () -> orderService.getOrders(userId));
 
-// Both operations run in parallel
+// Both operations run concurrently
 // Block and get results when needed
 User user = userFuture.get();
 List<Order> orders = ordersFuture.get();
@@ -129,10 +129,10 @@ Configure how steps handle transient failures:
 
 ```java
 // No retry - fail immediately (default)
-StepConfig.builder().retryStrategy(RetryStrategies.Presets.NO_RETRY).build()
+var noRetries = StepConfig.builder().retryStrategy(RetryStrategies.Presets.NO_RETRY).build()
 
 // Exponential backoff with jitter
-StepConfig.builder()
+var customRetries = StepConfig.builder()
     .retryStrategy(RetryStrategies.exponentialBackoff(
         5,                        // max attempts
         Duration.ofSeconds(2),    // initial delay  
@@ -142,7 +142,7 @@ StepConfig.builder()
     .build()
 ```
 
-### Step Semantics
+### Step-Retry Semantics
 
 Control how steps behave when interrupted mid-execution:
 
@@ -152,11 +152,11 @@ Control how steps behave when interrupted mid-execution:
 | `AT_MOST_ONCE_PER_RETRY` | Never re-executes; throws `StepInterruptedException` if interrupted | Non-idempotent operations (sending emails, charging payments) |
 
 ```java
-// Default: at-least-once (step may re-run if interrupted)
+// Default: at-least-once per retry (step may re-run if interrupted)
 var result = ctx.step("idempotent-update", Result.class, 
     () -> database.upsert(record));
 
-// At-most-once: step will not re-run if interrupted
+// At-most-once per retry
 var result = ctx.step("send-email", Result.class,
     () -> emailService.send(notification),
     StepConfig.builder()
@@ -164,37 +164,67 @@ var result = ctx.step("send-email", Result.class,
         .build());
 ```
 
-With `AT_MOST_ONCE_PER_RETRY`, if a step starts but the function is interrupted before the result is checkpointed, the SDK throws `StepInterruptedException` on replay instead of re-executing. Handle this to implement your own recovery logic.
+**Important**: These semantics apply *per retry attempt*, not per overall execution:
+
+- **AT_LEAST_ONCE_PER_RETRY**: The step executes at least once per retry. If the step succeeds but checkpointing fails (e.g., sandbox crash), the step re-executes on replay.
+- **AT_MOST_ONCE_PER_RETRY**: A checkpoint is created before execution. If failure occurs after checkpoint but before completion, the step is skipped on replay and `StepInterruptedException` is thrown.
+
+To achieve step-level at-most-once semantics, combine with a no-retry strategy:
+
+```java
+// True at-most-once: step executes at most once, ever
+var result = ctx.step("charge-payment", Result.class,
+    () -> paymentService.charge(amount),
+    StepConfig.builder()
+        .semantics(StepSemantics.AT_MOST_ONCE_PER_RETRY)
+        .retryStrategy(RetryStrategies.Presets.NO_RETRY)
+        .build());
+```
+
+Without this, a step using `AT_MOST_ONCE_PER_RETRY` with retries enabled could still execute multiple times across different retry attempts.
 
 ### Generic Types
 
-For complex generic types like `List<User>`, use `TypeToken`:
+When a step returns a parameterized type like `List<User>`, use `TypeToken` to preserve the type information:
 
 ```java
 var users = ctx.step("fetch-users", new TypeToken<List<User>>() {}, 
     () -> userService.getAllUsers());
+
+var orderMap = ctx.step("fetch-orders", new TypeToken<Map<String, Order>>() {},
+    () -> orderService.getOrdersByCustomer());
 ```
+
+This is needed for the SDK to deserialize a checkpointed result and get the exact type to reconstruct. See [TypeToken and Type Erasure](docs/internal-design.md#typetoken-and-type-erasure) for technical details. 
 
 ## Configuration
 
 Customize SDK behavior by overriding `createConfiguration()` in your handler:
 
 ```java
-@Override
-protected DurableConfig createConfiguration() {
-    // Custom Lambda client with connection pooling
-    var lambdaClient = LambdaClient.builder()
-        .httpClient(ApacheHttpClient.builder()
-            .maxConnections(50)
-            .connectionTimeout(Duration.ofSeconds(30))
-            .build())
-        .build();
+public class OrderProcessor extends DurableHandler<Order, OrderResult> {
 
-    return DurableConfig.builder()
-        .withLambdaClient(lambdaClient)
-        .withSerDes(new MyCustomSerDes())           // Custom serialization
-        .withExecutorService(Executors.newFixedThreadPool(10))  // Custom thread pool
-        .build();
+    @Override
+    protected DurableConfig createConfiguration() {
+        // Custom Lambda client with connection pooling
+        var lambdaClient = LambdaClient.builder()
+            .httpClient(ApacheHttpClient.builder()
+                .maxConnections(50)
+                .connectionTimeout(Duration.ofSeconds(30))
+                .build())
+            .build();
+
+        return DurableConfig.builder()
+            .withLambdaClient(lambdaClient)
+            .withSerDes(new MyCustomSerDes())           // Custom serialization
+            .withExecutorService(Executors.newFixedThreadPool(10))  // Custom thread pool
+            .build();
+    }
+
+    @Override
+    protected OrderResult handleRequest(Order order, DurableContext ctx) {
+        // Your handler logic
+    }
 }
 ```
 
@@ -311,7 +341,7 @@ Test against deployed Lambda functions:
 
 ```java
 var runner = CloudDurableTestRunner.create(
-    "arn:aws:lambda:us-east-1:123456789012:function:order-processor",
+    "arn:aws:lambda:us-east-1:123456789012:function:order-processor:$LATEST",
     Order.class,
     OrderResult.class);
 

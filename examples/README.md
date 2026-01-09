@@ -12,11 +12,11 @@ Example applications demonstrating the AWS Lambda Durable Execution SDK for Java
 
 ## Local Testing
 
-Run examples locally without AWS using `LocalDurableTestRunner`:
+Run examples locally without deploying to AWS using `LocalDurableTestRunner`:
 
 ```bash
-# First, build and install the SDK to local Maven repo (from project root)
-mvn clean install -DskipTests
+# Build and install the SDK to local Maven repo (required since SDK is not yet published)
+mvn clean install -DskipTests   # from project root
 
 cd examples
 

@@ -53,7 +53,7 @@ Context getLambdaContext()
 T get()  // Blocks until complete, may suspend
 ```
 
-### Configuration
+### Handler Configuration
 
 ```java
 public class MyHandler extends DurableHandler<Input, Output> {
@@ -74,7 +74,7 @@ public class MyHandler extends DurableHandler<Input, Output> {
 | `serDes` | `JacksonSerDes` |
 | `executor` | `Executors.newCachedThreadPool()` |
 
-### Per-Step Configuration
+### Step Configuration
 
 ```java
 context.step("name", Type.class, supplier,
@@ -94,6 +94,16 @@ public interface SerDes {
 }
 ```
 
+**TypeToken and Type Erasure:**
+
+Java's type erasure removes generic type parameters at runtime (`List<User>` becomes `List`). This is problematic for deserialization—Jackson needs the full type to reconstruct objects correctly.
+
+`TypeToken<T>` solves this by capturing generic types at compile time. Creating `new TypeToken<List<User>>() {}` produces an anonymous subclass whose superclass type parameter is preserved in bytecode and accessible via reflection (`getGenericSuperclass()`).
+
+The `SerDes` interface provides both `Class<T>` and `TypeToken<T>` overloads:
+- Use `Class<T>` for simple types: `String.class`, `User.class`
+- Use `TypeToken<T>` for parameterized types: `new TypeToken<List<User>>() {}`
+
 **Custom RetryStrategy Interface:**
 ```java
 @FunctionalInterface
@@ -107,24 +117,24 @@ public interface RetryStrategy {
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                           Lambda Runtime                                 │
+│                           Lambda Runtime                                │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  DurableHandler<I,O>                                                     │
-│  - Entry point (RequestStreamHandler)                                    │
-│  - Extracts input type via reflection                                    │
-│  - Delegates to DurableExecutor                                          │
+│  DurableHandler<I,O>                                                    │
+│  - Entry point (RequestStreamHandler)                                   │
+│  - Extracts input type via reflection                                   │
+│  - Delegates to DurableExecutor                                         │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  DurableExecutor                                                         │
-│  - Creates ExecutionManager, DurableContext                              │
-│  - Runs handler in executor                                              │
-│  - Waits for completion OR suspension                                    │
-│  - Returns SUCCESS/PENDING/FAILED                                        │
+│  DurableExecutor                                                        │
+│  - Creates ExecutionManager, DurableContext                             │
+│  - Runs handler in executor                                             │
+│  - Waits for completion OR suspension                                   │
+│  - Returns SUCCESS/PENDING/FAILED                                       │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
                     ┌───────────────┴───────────────┐
