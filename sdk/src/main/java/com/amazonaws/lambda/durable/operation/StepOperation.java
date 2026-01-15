@@ -349,8 +349,7 @@ public class StepOperation<T> implements DurableOperation<T> {
             throw new StepFailedException(
                     String.format(
                             "Step failed with error of type %s. Message: %s",
-                            errorType,
-                            op.stepDetails().error().errorMessage()),
+                            errorType, op.stepDetails().error().errorMessage()),
                     null,
                     // Preserve original stack trace
                     StepFailedException.deserializeStackTrace(
