@@ -102,7 +102,7 @@ public class StepOperation<T> implements DurableOperation<T> {
 
     @Override
     public void execute() {
-        var existing = executionManager.getOperation(operationId);
+        var existing = executionManager.getOperationAndUpdateReplayState(operationId);
 
         if (existing != null) {
             // This means we are in a replay scenario
@@ -112,7 +112,7 @@ public class StepOperation<T> implements DurableOperation<T> {
                     // deregister from the Phaser
                     // so that .get() doesn't block and returns the result immediately. See
                     // StepOperation.get().
-                    logger.debug("Detected terminal status during replay. Advancing phaser 0 -> 1 {}.", phaser);
+                    logger.trace("Detected terminal status during replay. Advancing phaser 0 -> 1 {}.", phaser);
                     phaser.arriveAndDeregister(); // Phase 0 -> 1
                 }
                 case STARTED -> {
@@ -163,6 +163,8 @@ public class StepOperation<T> implements DurableOperation<T> {
 
         // Execute in managed executor
         executionManager.getManagedExecutor().execute(() -> {
+            // Set operation context for logging in this thread
+            executionManager.setCurrentOperation(operationId, name, attempt);
             try {
                 // Check if we need to send START
                 var existing = executionManager.getOperation(operationId);
@@ -200,6 +202,7 @@ public class StepOperation<T> implements DurableOperation<T> {
             } catch (Throwable e) {
                 handleStepError(e, attempt);
             } finally {
+                executionManager.clearCurrentOperation();
                 executionManager.deregisterActiveThread(stepThreadId);
             }
         });
@@ -295,7 +298,7 @@ public class StepOperation<T> implements DurableOperation<T> {
             executionManager.deregisterActiveThread("Root");
 
             // Block until operation completes
-            logger.debug("Waiting for operation to finish {} (Phaser: {})", operationId, phaser);
+            logger.trace("Waiting for operation to finish {} (Phaser: {})", operationId, phaser);
             phaser.arriveAndAwaitAdvance(); // Wait for phase 0
 
             // Reactivate current thread
