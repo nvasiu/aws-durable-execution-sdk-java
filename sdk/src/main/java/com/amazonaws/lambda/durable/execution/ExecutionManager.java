@@ -15,6 +15,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Phaser;
+import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.lambda.model.Operation;
@@ -45,6 +46,7 @@ public class ExecutionManager {
     private final String executionOperationId;
     private volatile String checkpointToken;
     private final String durableExecutionArn;
+    private final AtomicReference<ExecutionMode> executionMode;
 
     // ===== Thread Coordination =====
     private final Map<String, ThreadType> activeThreads = Collections.synchronizedMap(new HashMap<>());
@@ -69,6 +71,10 @@ public class ExecutionManager {
         this.client = client;
         this.executionOperationId = initialExecutionState.operations().get(0).id();
         loadAllOperations(initialExecutionState);
+
+        // Start in REPLAY mode if we have more than just the initial EXECUTION operation
+        this.executionMode =
+                new AtomicReference<>(operations.size() > 1 ? ExecutionMode.REPLAY : ExecutionMode.EXECUTION);
 
         this.managedExecutor = executor;
 
@@ -105,6 +111,10 @@ public class ExecutionManager {
         return durableExecutionArn;
     }
 
+    public boolean isReplaying() {
+        return executionMode.get() == ExecutionMode.REPLAY;
+    }
+
     public String getCheckpointToken() {
         return checkpointToken;
     }
@@ -119,9 +129,9 @@ public class ExecutionManager {
                 var phaser = openPhasers.get(operation.id());
 
                 // Two-phase completion
-                logger.debug("Advancing phaser 0 -> 1: {}", phaser);
+                logger.trace("Advancing phaser 0 -> 1: {}", phaser);
                 phaser.arriveAndAwaitAdvance();
-                logger.debug("Advancing phaser 1 -> 2: {}", phaser);
+                logger.trace("Advancing phaser 1 -> 2: {}", phaser);
                 phaser.arriveAndAwaitAdvance();
             }
         }
@@ -129,6 +139,23 @@ public class ExecutionManager {
 
     public Operation getOperation(String operationId) {
         return operations.get(operationId);
+    }
+
+    /**
+     * Gets an operation by ID and updates replay state. Transitions from REPLAY to EXECUTION mode if the operation is
+     * not found or is not in a terminal state (still in progress).
+     *
+     * @param operationId the operation ID to get
+     * @return the existing operation, or null if not found (first execution)
+     */
+    public Operation getOperationAndUpdateReplayState(String operationId) {
+        var existing = operations.get(operationId);
+        if (existing == null || !isTerminalStatus(existing.status())) {
+            if (executionMode.compareAndSet(ExecutionMode.REPLAY, ExecutionMode.EXECUTION)) {
+                logger.debug("Transitioned to EXECUTION mode at operation '{}'", operationId);
+            }
+        }
+        return existing;
     }
 
     public Operation getExecutionOperation() {
@@ -139,13 +166,13 @@ public class ExecutionManager {
 
     public void registerActiveThread(String threadId, ThreadType threadType) {
         if (activeThreads.containsKey(threadId)) {
-            logger.debug("Thread '{}' ({}) already registered as active", threadId, threadType);
+            logger.trace("Thread '{}' ({}) already registered as active", threadId, threadType);
             return;
         }
 
         synchronized (this) {
             activeThreads.put(threadId, threadType);
-            logger.debug(
+            logger.trace(
                     "Registered thread '{}' ({}) as active. Active threads: {}",
                     threadId,
                     threadType,
@@ -166,7 +193,7 @@ public class ExecutionManager {
 
         synchronized (this) {
             ThreadType type = activeThreads.remove(threadId);
-            logger.debug("Deregistered thread '{}' ({}). Active threads: {}", threadId, type, activeThreads.size());
+            logger.trace("Deregistered thread '{}' ({}). Active threads: {}", threadId, type, activeThreads.size());
 
             if (activeThreads.isEmpty()) {
                 logger.info("No active threads remaining - suspending execution");
@@ -181,7 +208,7 @@ public class ExecutionManager {
     public Phaser startPhaser(String operationId) {
         var phaser = new Phaser(1);
         openPhasers.put(operationId, phaser);
-        logger.debug("Started phaser for operation '{}'", operationId);
+        logger.trace("Started phaser for operation '{}'", operationId);
         return phaser;
     }
 
