@@ -223,16 +223,14 @@ public class ExecutionManager {
             return;
         }
 
-        synchronized (this) {
-            ThreadType type = activeThreads.remove(threadId);
-            currentContext.remove();
-            logger.trace("Deregistered thread '{}' ({}). Active threads: {}", threadId, type, activeThreads.size());
+        ThreadType type = activeThreads.remove(threadId);
+        currentContext.remove();
+        logger.trace("Deregistered thread '{}' ({}). Active threads: {}", threadId, type, activeThreads.size());
 
-            if (activeThreads.isEmpty()) {
-                logger.info("No active threads remaining - suspending execution");
-                suspendExecutionFuture.complete(null);
-                throw new SuspendExecutionException();
-            }
+        if (activeThreads.isEmpty()) {
+            logger.info("No active threads remaining - suspending execution");
+            suspendExecutionFuture.complete(null);
+            throw new SuspendExecutionException();
         }
     }
 
