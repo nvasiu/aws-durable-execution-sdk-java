@@ -46,7 +46,7 @@ public class DurableContext {
                 loggerConfig.suppressReplayLogs());
 
         // Register root context thread as active
-        executionManager.registerActiveThread(contextId, ThreadType.CONTEXT);
+        executionManager.registerActiveThreadWithContext(contextId, ThreadType.CONTEXT);
     }
 
     DurableContext(ExecutionManager executionManager, SerDes serDes, Context lambdaContext, LoggerConfig loggerConfig) {
