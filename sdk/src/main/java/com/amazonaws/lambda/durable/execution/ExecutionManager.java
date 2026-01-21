@@ -50,6 +50,7 @@ public class ExecutionManager {
 
     // ===== Thread Coordination =====
     private final Map<String, ThreadType> activeThreads = Collections.synchronizedMap(new HashMap<>());
+    private static final ThreadLocal<OperationContext> currentContext = new ThreadLocal<>();
     private final Map<String, Phaser> openPhasers = Collections.synchronizedMap(new HashMap<>());
     private final CompletableFuture<Void> suspendExecutionFuture = new CompletableFuture<>();
 
@@ -164,20 +165,51 @@ public class ExecutionManager {
 
     // ===== Thread Coordination =====
 
+    public void registerActiveThreadWithContext(String threadId, ThreadType threadType) {
+        if (activeThreads.containsKey(threadId)) {
+            logger.trace("Thread '{}' ({}) already registered as active", threadId, threadType);
+            return;
+        }
+        activeThreads.put(threadId, threadType);
+        currentContext.set(new OperationContext(threadId, threadType));
+        logger.trace(
+                "Registered thread '{}' ({}) as active. Active threads: {}",
+                threadId,
+                threadType,
+                activeThreads.size());
+    }
+
+    /**
+     * Registers a thread as active without setting the thread local OperationContext. Use this when registration must
+     * happen on a different thread than execution. Call setCurrentContext() on the execution thread to set the local
+     * OperationContext.
+     *
+     * @see OperationContext
+     */
     public void registerActiveThread(String threadId, ThreadType threadType) {
         if (activeThreads.containsKey(threadId)) {
             logger.trace("Thread '{}' ({}) already registered as active", threadId, threadType);
             return;
         }
+        activeThreads.put(threadId, threadType);
+        logger.trace(
+                "Registered thread '{}' ({}) as active (no context). Active threads: {}",
+                threadId,
+                threadType,
+                activeThreads.size());
+    }
 
-        synchronized (this) {
-            activeThreads.put(threadId, threadType);
-            logger.trace(
-                    "Registered thread '{}' ({}) as active. Active threads: {}",
-                    threadId,
-                    threadType,
-                    activeThreads.size());
-        }
+    /**
+     * Sets the current thread's context. Use after registerActiveThreadWithoutContext() when the execution thread is
+     * different from the registration thread.
+     */
+    public void setCurrentContext(String contextId, ThreadType threadType) {
+        currentContext.set(new OperationContext(contextId, threadType));
+    }
+
+    /** Returns the current thread's context, or null if not set. */
+    public OperationContext getCurrentContext() {
+        return currentContext.get();
     }
 
     public void deregisterActiveThread(String threadId) {
@@ -191,15 +223,14 @@ public class ExecutionManager {
             return;
         }
 
-        synchronized (this) {
-            ThreadType type = activeThreads.remove(threadId);
-            logger.trace("Deregistered thread '{}' ({}). Active threads: {}", threadId, type, activeThreads.size());
+        ThreadType type = activeThreads.remove(threadId);
+        currentContext.remove();
+        logger.trace("Deregistered thread '{}' ({}). Active threads: {}", threadId, type, activeThreads.size());
 
-            if (activeThreads.isEmpty()) {
-                logger.info("No active threads remaining - suspending execution");
-                suspendExecutionFuture.complete(null);
-                throw new SuspendExecutionException();
-            }
+        if (activeThreads.isEmpty()) {
+            logger.info("No active threads remaining - suspending execution");
+            suspendExecutionFuture.complete(null);
+            throw new SuspendExecutionException();
         }
     }
 

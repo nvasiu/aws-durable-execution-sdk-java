@@ -163,12 +163,17 @@ public class StepOperation<T> implements DurableOperation<T> {
     }
 
     private void executeStepLogic(int attempt) {
-        // Register step thread as active
+        // TODO: Modify this logic when child contexts are introduced such that the child context id is in this key
         var stepThreadId = operationId + "-step";
+
+        // Register step thread as active BEFORE executor runs (prevents suspension when handler deregisters)
+        // thread local OperationContext is set inside the executor since that's where the step actually runs
         executionManager.registerActiveThread(stepThreadId, ThreadType.STEP);
 
         // Execute in managed executor
         executionManager.getManagedExecutor().execute(() -> {
+            // Set thread local OperationContext on the executor thread
+            executionManager.setCurrentContext(stepThreadId, ThreadType.STEP);
             // Set operation context for logging in this thread
             durableLogger.setOperationContext(operationId, name, attempt);
             try {
@@ -290,6 +295,15 @@ public class StepOperation<T> implements DurableOperation<T> {
 
     @Override
     public T get() {
+        // Get current context from ThreadLocal
+        var currentContext = executionManager.getCurrentContext();
+
+        // Nested steps are not supported
+        if (currentContext.threadType() == ThreadType.STEP) {
+            throw new IllegalStateException("Nested step calling is not supported. Cannot call get() on step '" + name
+                    + "' from within another step's execution.");
+        }
+
         // If we are in a replay where the operation is already complete (SUCCEEDED /
         // FAILED), the Phaser will be
         // advanced in .execute() already and we don't block but return the result
@@ -298,17 +312,16 @@ public class StepOperation<T> implements DurableOperation<T> {
             // Operation not done yet
             phaser.register();
 
-            // Deregister current thread - allows suspension
-            // TODO: The threadId here should be the (potential childContext) thread id that
-            // is calling .get()
-            executionManager.deregisterActiveThread("Root");
+            // Deregister current context - allows suspension
+            logger.debug("StepOperation.get() attempting to deregister context: {}", currentContext.contextId());
+            executionManager.deregisterActiveThread(currentContext.contextId());
 
             // Block until operation completes
             logger.trace("Waiting for operation to finish {} (Phaser: {})", operationId, phaser);
             phaser.arriveAndAwaitAdvance(); // Wait for phase 0
 
-            // Reactivate current thread
-            executionManager.registerActiveThread("Root", ThreadType.CONTEXT);
+            // Reactivate current context
+            executionManager.registerActiveThreadWithContext(currentContext.contextId(), currentContext.threadType());
 
             // Complete phase 1
             phaser.arriveAndDeregister();

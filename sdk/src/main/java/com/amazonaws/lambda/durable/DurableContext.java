@@ -27,7 +27,12 @@ public class DurableContext {
     private final AtomicInteger operationCounter;
     private final DurableLogger logger;
 
-    DurableContext(ExecutionManager executionManager, SerDes serDes, Context lambdaContext, LoggerConfig loggerConfig) {
+    DurableContext(
+            ExecutionManager executionManager,
+            SerDes serDes,
+            Context lambdaContext,
+            LoggerConfig loggerConfig,
+            String contextId) {
         this.executionManager = executionManager;
         this.serDes = serDes;
         this.lambdaContext = lambdaContext;
@@ -41,9 +46,11 @@ public class DurableContext {
                 loggerConfig.suppressReplayLogs());
 
         // Register root context thread as active
-        // TODO: Once we implement child contexts, the threadId needs to be the ID of
-        // the child context
-        executionManager.registerActiveThread("Root", ThreadType.CONTEXT);
+        executionManager.registerActiveThreadWithContext(contextId, ThreadType.CONTEXT);
+    }
+
+    DurableContext(ExecutionManager executionManager, SerDes serDes, Context lambdaContext, LoggerConfig loggerConfig) {
+        this(executionManager, serDes, lambdaContext, loggerConfig, "Root");
     }
 
     public <T> T step(String name, Class<T> resultType, Supplier<T> func) {
