@@ -73,6 +73,7 @@ public class MyHandler extends DurableHandler<Input, Output> {
 | `lambdaClient` | Auto-created `LambdaClient` for current region, primed for performance (see [`DurableConfig.java`](../sdk/src/main/java/com/amazonaws/lambda/durable/DurableConfig.java)) |
 | `serDes` | `JacksonSerDes` |
 | `executor` | `Executors.newCachedThreadPool()` |
+| `loggerConfig` | `LoggerConfig.defaults()` (suppress replay logs) |
 
 ### Step Configuration
 
@@ -151,6 +152,7 @@ com.amazonaws.lambda.durable
 │
 ├── execution/
 │   ├── ExecutionManager     # Central coordinator
+│   ├── ExecutionMode        # REPLAY or EXECUTION state
 │   ├── CheckpointBatcher    # Batching (package-private)
 │   ├── CheckpointCallback   # Callback interface
 │   ├── SuspendExecutionException
@@ -161,6 +163,10 @@ com.amazonaws.lambda.durable
 │   ├── DurableOperation<T>  # Interface
 │   ├── StepOperation<T>     # Step logic
 │   └── WaitOperation        # Wait logic
+│
+├── logging/
+│   ├── DurableLogger        # Context-aware logger wrapper (MDC-based)
+│   └── LoggerConfig         # Replay suppression config
 │
 ├── retry/
 │   ├── RetryStrategy        # Interface
@@ -291,6 +297,53 @@ SuspendExecutionException        # Internal: triggers suspension (not user-facin
 | `StepInterruptedException` | AT_MOST_ONCE step interrupted mid-execution | Treat as failure |
 | `NonDeterministicExecutionException` | Replay finds different operation than expected | Bug in handler (non-deterministic code) |
 | `SerDesException` | Jackson fails to serialize/deserialize | Fix data model or custom SerDes |
+
+---
+
+## Logging Internals
+
+### Replay Mode Tracking
+
+`ExecutionManager` tracks whether we're replaying completed operations or executing new ones via `ExecutionMode`:
+
+- **REPLAY**: Starts in this mode if `operations.size() > 1` (has checkpointed operations beyond the initial EXECUTION op)
+- **EXECUTION**: Transitions when `getOperationAndUpdateReplayState()` encounters:
+  - An operation ID not in the checkpoint log (new operation)
+  - An operation that is NOT in a terminal state (needs to continue executing)
+
+Terminal states (SUCCEEDED, FAILED, CANCELLED, TIMED_OUT, STOPPED) stay in REPLAY mode since we're just returning cached results.
+
+This is a one-way transition (REPLAY → EXECUTION, never back). `DurableLogger` checks `isReplaying()` to suppress duplicate logs during replay.
+
+### MDC-Based Context Enrichment
+
+`DurableLogger` uses SLF4J's MDC (Mapped Diagnostic Context) to enrich log entries with execution metadata. MDC is thread-local by design, so context is set once per thread rather than per log call for performance.
+
+**MDC Keys:**
+| Key | Set When | Description |
+|-----|----------|-------------|
+| `durableExecutionArn` | Logger construction | Execution ARN |
+| `requestId` | Logger construction | Lambda request ID |
+| `operationId` | Step start | Current operation ID |
+| `operationName` | Step start | Step name |
+| `attempt` | Step start | Retry attempt number |
+
+**Context Flow:**
+1. `DurableLogger` constructor sets execution-level MDC (ARN, requestId) on the handler thread
+2. `StepOperation.executeStepLogic()` calls `durableLogger.setOperationContext()` before user code runs
+3. User code logs via `context.getLogger()` - MDC values automatically included
+4. `clearOperationContext()` called in finally block after step completes
+
+**Log Pattern Example (Log4j2):**
+```xml
+<PatternLayout pattern="%d %-5level %logger - %msg%notEmpty{ | arn=%X{durableExecutionArn}}%notEmpty{ id=%X{operationId}}%notEmpty{ op=%X{operationName}}%notEmpty{ attempt=%X{attempt}}%n"/>
+```
+
+**Output:**
+```
+12:34:56 INFO  c.a.l.d.DurableContext - Processing order | arn=arn:aws:lambda:us-east-1:123:function:test
+12:34:56 DEBUG c.a.l.d.DurableContext - Validating items | arn=arn:aws:lambda:us-east-1:123:function:test id=1 op=validate attempt=0
+```
 
 ---
 

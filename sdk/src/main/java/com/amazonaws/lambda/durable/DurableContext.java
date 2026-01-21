@@ -5,6 +5,8 @@ package com.amazonaws.lambda.durable;
 import com.amazonaws.lambda.durable.exception.NonDeterministicExecutionException;
 import com.amazonaws.lambda.durable.execution.ExecutionManager;
 import com.amazonaws.lambda.durable.execution.ThreadType;
+import com.amazonaws.lambda.durable.logging.DurableLogger;
+import com.amazonaws.lambda.durable.logging.LoggerConfig;
 import com.amazonaws.lambda.durable.operation.StepOperation;
 import com.amazonaws.lambda.durable.operation.WaitOperation;
 import com.amazonaws.lambda.durable.retry.RetryStrategies;
@@ -14,25 +16,41 @@ import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
+import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.lambda.model.Operation;
 import software.amazon.awssdk.services.lambda.model.OperationType;
 
 public class DurableContext {
-    private static final String HANDLER_CONTEXT_ID = "handler";
-
     private final ExecutionManager executionManager;
     private final SerDes serDes;
     private final Context lambdaContext;
     private final AtomicInteger operationCounter;
+    private final DurableLogger logger;
 
-    DurableContext(ExecutionManager executionManager, SerDes serDes, Context lambdaContext) {
+    DurableContext(
+            ExecutionManager executionManager,
+            SerDes serDes,
+            Context lambdaContext,
+            LoggerConfig loggerConfig,
+            String contextId) {
         this.executionManager = executionManager;
         this.serDes = serDes;
         this.lambdaContext = lambdaContext;
         this.operationCounter = new AtomicInteger(0);
 
-        // Register handler context as active
-        executionManager.registerActiveThread(HANDLER_CONTEXT_ID, ThreadType.CONTEXT);
+        var requestId = lambdaContext != null ? lambdaContext.getAwsRequestId() : null;
+        this.logger = new DurableLogger(
+                LoggerFactory.getLogger(DurableContext.class),
+                executionManager,
+                requestId,
+                loggerConfig.suppressReplayLogs());
+
+        // Register root context thread as active
+        executionManager.registerActiveThread(contextId, ThreadType.CONTEXT);
+    }
+
+    DurableContext(ExecutionManager executionManager, SerDes serDes, Context lambdaContext, LoggerConfig loggerConfig) {
+        this(executionManager, serDes, lambdaContext, loggerConfig, "Root");
     }
 
     public <T> T step(String name, Class<T> resultType, Supplier<T> func) {
@@ -86,7 +104,7 @@ public class DurableContext {
 
         // Create and start step operation
         StepOperation<T> operation =
-                new StepOperation<>(operationId, name, func, resultType, config, executionManager, serDes);
+                new StepOperation<>(operationId, name, func, resultType, config, executionManager, logger, serDes);
 
         operation.execute(); // Start the step (returns immediately)
 
@@ -114,7 +132,7 @@ public class DurableContext {
 
         // Create and start step operation with TypeToken
         StepOperation<T> operation =
-                new StepOperation<>(operationId, name, func, typeToken, config, executionManager, serDes);
+                new StepOperation<>(operationId, name, func, typeToken, config, executionManager, logger, serDes);
 
         operation.execute(); // Start the step (returns immediately)
 
@@ -143,6 +161,10 @@ public class DurableContext {
 
     public Context getLambdaContext() {
         return lambdaContext;
+    }
+
+    public DurableLogger getLogger() {
+        return logger;
     }
 
     private String nextOperationId() {

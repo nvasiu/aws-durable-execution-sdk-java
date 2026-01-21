@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="WARN">
+    <Appenders>
+        <Console name="Console" target="SYSTEM_OUT">
+            <JsonTemplateLayout eventTemplateUri="classpath:EcsLayout.json"/>
+        </Console>
+    </Appenders>
+    
+    <Loggers>
+        <!-- SDK internal logs at DEBUG for testing -->
+        <Logger name="com.amazonaws.lambda.durable" level="DEBUG"/>
+        
+        <!-- AWS SDK logs at WARN -->
+        <Logger name="software.amazon.awssdk" level="WARN"/>
+        
+        <!-- Everything else at INFO -->
+        <Root level="INFO">
+            <AppenderRef ref="Console"/>
+        </Root>
+    </Loggers>
+</Configuration>

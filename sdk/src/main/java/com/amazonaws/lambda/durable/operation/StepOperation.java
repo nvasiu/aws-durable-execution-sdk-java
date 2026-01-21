@@ -10,6 +10,7 @@ import com.amazonaws.lambda.durable.exception.StepInterruptedException;
 import com.amazonaws.lambda.durable.execution.ExecutionManager;
 import com.amazonaws.lambda.durable.execution.ExecutionPhase;
 import com.amazonaws.lambda.durable.execution.ThreadType;
+import com.amazonaws.lambda.durable.logging.DurableLogger;
 import com.amazonaws.lambda.durable.serde.SerDes;
 import java.time.Duration;
 import java.time.Instant;
@@ -36,6 +37,7 @@ public class StepOperation<T> implements DurableOperation<T> {
     private final TypeToken<T> resultTypeToken;
     private final StepConfig config;
     private final ExecutionManager executionManager;
+    private final DurableLogger durableLogger;
     private final SerDes serDes;
     private final Phaser phaser;
 
@@ -46,8 +48,9 @@ public class StepOperation<T> implements DurableOperation<T> {
             Class<T> resultType,
             StepConfig config,
             ExecutionManager executionManager,
+            DurableLogger durableLogger,
             SerDes serDes) {
-        this(operationId, name, function, resultType, null, config, executionManager, serDes);
+        this(operationId, name, function, resultType, null, config, executionManager, durableLogger, serDes);
     }
 
     public StepOperation(
@@ -57,8 +60,9 @@ public class StepOperation<T> implements DurableOperation<T> {
             TypeToken<T> resultTypeToken,
             StepConfig config,
             ExecutionManager executionManager,
+            DurableLogger durableLogger,
             SerDes serDes) {
-        this(operationId, name, function, null, resultTypeToken, config, executionManager, serDes);
+        this(operationId, name, function, null, resultTypeToken, config, executionManager, durableLogger, serDes);
     }
 
     private StepOperation(
@@ -69,6 +73,7 @@ public class StepOperation<T> implements DurableOperation<T> {
             TypeToken<T> resultTypeToken,
             StepConfig config,
             ExecutionManager executionManager,
+            DurableLogger durableLogger,
             SerDes serDes) {
         if (resultType == null && resultTypeToken == null) {
             throw new IllegalArgumentException("Either resultType or resultTypeToken must be provided");
@@ -84,6 +89,7 @@ public class StepOperation<T> implements DurableOperation<T> {
         this.resultTypeToken = resultTypeToken;
         this.config = config;
         this.executionManager = executionManager;
+        this.durableLogger = durableLogger;
         // Use custom SerDes from config if provided, otherwise use default
         this.serDes = (config != null && config.serDes() != null) ? config.serDes() : serDes;
 
@@ -102,7 +108,7 @@ public class StepOperation<T> implements DurableOperation<T> {
 
     @Override
     public void execute() {
-        var existing = executionManager.getOperation(operationId);
+        var existing = executionManager.getOperationAndUpdateReplayState(operationId);
 
         if (existing != null) {
             // This means we are in a replay scenario
@@ -112,7 +118,7 @@ public class StepOperation<T> implements DurableOperation<T> {
                     // deregister from the Phaser
                     // so that .get() doesn't block and returns the result immediately. See
                     // StepOperation.get().
-                    logger.debug("Detected terminal status during replay. Advancing phaser 0 -> 1 {}.", phaser);
+                    logger.trace("Detected terminal status during replay. Advancing phaser 0 -> 1 {}.", phaser);
                     phaser.arriveAndDeregister(); // Phase 0 -> 1
                 }
                 case STARTED -> {
@@ -168,6 +174,8 @@ public class StepOperation<T> implements DurableOperation<T> {
         executionManager.getManagedExecutor().execute(() -> {
             // Set ThreadLocal context on the executor thread
             executionManager.setCurrentContext(stepThreadId, ThreadType.STEP);
+            // Set operation context for logging in this thread
+            durableLogger.setOperationContext(operationId, name, attempt);
             try {
                 // Check if we need to send START
                 var existing = executionManager.getOperation(operationId);
@@ -206,6 +214,7 @@ public class StepOperation<T> implements DurableOperation<T> {
                 handleStepError(e, attempt);
             } finally {
                 executionManager.deregisterActiveThread(stepThreadId);
+                durableLogger.clearOperationContext();
             }
         });
     }
@@ -309,7 +318,7 @@ public class StepOperation<T> implements DurableOperation<T> {
             executionManager.deregisterActiveThread(currentContextId);
 
             // Block until operation completes
-            logger.debug("Waiting for operation to finish {} (Phaser: {})", operationId, phaser);
+            logger.trace("Waiting for operation to finish {} (Phaser: {})", operationId, phaser);
             phaser.arriveAndAwaitAdvance(); // Wait for phase 0
 
             // Reactivate current context
