@@ -8,6 +8,7 @@ import com.amazonaws.lambda.durable.execution.ThreadType;
 import com.amazonaws.lambda.durable.logging.DurableLogger;
 import com.amazonaws.lambda.durable.logging.LoggerConfig;
 import com.amazonaws.lambda.durable.operation.CallbackOperation;
+import com.amazonaws.lambda.durable.operation.InvokeOperation;
 import com.amazonaws.lambda.durable.operation.StepOperation;
 import com.amazonaws.lambda.durable.operation.WaitOperation;
 import com.amazonaws.lambda.durable.retry.RetryStrategies;
@@ -144,6 +145,72 @@ public class DurableContext {
 
         operation.execute(); // Checkpoint the wait
         operation.get(); // Block (will throw SuspendExecutionException if needed)
+    }
+
+    public <T, U> T invoke(String name, String functionName, U payload, Class<T> resultType) {
+        return invokeAsync(
+                        name,
+                        functionName,
+                        payload,
+                        resultType,
+                        InvokeConfig.builder().build())
+                .get();
+    }
+
+    public <T, U> T invoke(String name, String functionName, U payload, Class<T> resultType, InvokeConfig config) {
+        return invokeAsync(name, functionName, payload, TypeToken.get(resultType), config)
+                .get();
+    }
+
+    public <T, U> T invoke(String name, String functionName, U payload, TypeToken<T> typeToken) {
+        return invokeAsync(
+                        name,
+                        functionName,
+                        payload,
+                        typeToken,
+                        InvokeConfig.builder().build())
+                .get();
+    }
+
+    public <T, U> T invoke(String name, String functionName, U payload, TypeToken<T> typeToken, InvokeConfig config) {
+        return invokeAsync(name, functionName, payload, typeToken, config).get();
+    }
+
+    public <T, U> DurableFuture<T> invokeAsync(
+            String name, String functionName, U payload, Class<T> resultType, InvokeConfig config) {
+        return invokeAsync(name, functionName, payload, TypeToken.get(resultType), config);
+    }
+
+    public <T, U> DurableFuture<T> invokeAsync(String name, String functionName, U payload, Class<T> resultType) {
+        return invokeAsync(
+                name,
+                functionName,
+                payload,
+                TypeToken.get(resultType),
+                InvokeConfig.builder().build());
+    }
+
+    public <T, U> DurableFuture<T> invokeAsync(String name, String functionName, U payload, TypeToken<T> resultType) {
+        return invokeAsync(
+                name, functionName, payload, resultType, InvokeConfig.builder().build());
+    }
+
+    public <T, U> DurableFuture<T> invokeAsync(
+            String name, String functionName, U payload, TypeToken<T> typeToken, InvokeConfig config) {
+        var operationId = nextOperationId();
+
+        // Validate replay consistency
+        var existing = executionManager.getOperation(operationId);
+        if (existing != null) {
+            validateReplay(operationId, OperationType.CHAINED_INVOKE, name, existing);
+        }
+
+        // Create and start invoke operation
+        var operation = new InvokeOperation<>(
+                operationId, name, functionName, payload, typeToken, config, executionManager, serDes);
+
+        operation.execute(); // checkpoint the invoke operation
+        return new DurableFuture<>(operation); // Block (will throw SuspendExecutionException if needed)
     }
 
     public Context getLambdaContext() {
