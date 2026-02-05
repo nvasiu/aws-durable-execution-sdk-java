@@ -14,7 +14,7 @@ import com.amazonaws.lambda.durable.execution.SuspendExecutionException;
 import com.amazonaws.lambda.durable.execution.ThreadType;
 import com.amazonaws.lambda.durable.logging.DurableLogger;
 import com.amazonaws.lambda.durable.serde.SerDes;
-import com.amazonaws.lambda.durable.util.SneakyThrow;
+import com.amazonaws.lambda.durable.util.ExceptionHelper;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.concurrent.CompletableFuture;
@@ -24,6 +24,7 @@ import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.lambda.model.ErrorObject;
+import software.amazon.awssdk.services.lambda.model.Operation;
 import software.amazon.awssdk.services.lambda.model.OperationAction;
 import software.amazon.awssdk.services.lambda.model.OperationStatus;
 import software.amazon.awssdk.services.lambda.model.OperationType;
@@ -104,7 +105,7 @@ public class StepOperation<T> implements DurableOperation<T> {
                             : 0;
                     if (getSemantics() == StepSemantics.AT_MOST_ONCE_PER_RETRY) {
                         // AT_MOST_ONCE: treat as interrupted, go through retry logic
-                        handleInterruptedStep(attempt);
+                        handleInterruptedStep(existing, attempt);
                     } else {
                         // AT_LEAST_ONCE: re-execute the step
                         executeStepLogic(attempt);
@@ -203,29 +204,22 @@ public class StepOperation<T> implements DurableOperation<T> {
         });
     }
 
-    private void handleInterruptedStep(int attempt) {
-        var error = new StepInterruptedException(operationId, name);
-        handleStepFailure(error, attempt + 1);
+    private void handleInterruptedStep(Operation operation, int attempt) {
+        var exception = new StepInterruptedException(operation);
+        handleStepFailure(exception, exception.getErrorObject(), attempt + 1);
     }
 
     private StepSemantics getSemantics() {
         return config != null ? config.semantics() : StepSemantics.AT_LEAST_ONCE_PER_RETRY;
     }
 
-    private void handleStepError(Throwable e, int attempt) {
-        handleStepFailure(e, attempt);
+    private void handleStepError(Throwable exception, int attempt) {
+        handleStepFailure(exception, ExceptionHelper.buildErrorObject(exception, serDes), attempt);
     }
 
-    private void handleStepFailure(Throwable error, int attempt) {
-        var errorObject = ErrorObject.builder()
-                .errorType(error.getClass().getName())
-                .errorMessage(error.getMessage())
-                .errorData(serDes.serialize(error))
-                .stackTrace(StepFailedException.serializeStackTrace(error.getStackTrace()))
-                .build();
-
+    private void handleStepFailure(Throwable exception, ErrorObject errorObject, int attempt) {
         if (config != null && config.retryStrategy() != null) {
-            var retryDecision = config.retryStrategy().makeRetryDecision(error, attempt);
+            var retryDecision = config.retryStrategy().makeRetryDecision(exception, attempt);
 
             if (retryDecision.shouldRetry()) {
                 // Send RETRY
@@ -323,11 +317,12 @@ public class StepOperation<T> implements DurableOperation<T> {
 
             return serDes.deserialize(result, resultTypeToken);
         } else {
-            var errorType = op.stepDetails().error().errorType();
+            var errorObject = op.stepDetails().error();
+            var errorType = errorObject.errorType();
 
             // Throw StepInterruptedException directly for AT_MOST_ONCE interrupted steps
-            if (StepInterruptedException.class.getName().equals(errorType)) {
-                throw new StepInterruptedException(operationId, name);
+            if (StepInterruptedException.isStepInterruptedException(errorObject)) {
+                throw new StepInterruptedException(op);
             }
 
             // Attempt to reconstruct and throw the original exception
@@ -335,13 +330,11 @@ public class StepOperation<T> implements DurableOperation<T> {
                 Class<?> exceptionClass = Class.forName(errorType);
                 if (Throwable.class.isAssignableFrom(exceptionClass)) {
                     Throwable original = serDes.deserialize(
-                            op.stepDetails().error().errorData(),
-                            TypeToken.get(exceptionClass.asSubclass(Throwable.class)));
+                            errorObject.errorData(), TypeToken.get(exceptionClass.asSubclass(Throwable.class)));
 
                     if (original != null) {
-                        original.setStackTrace(StepFailedException.deserializeStackTrace(
-                                op.stepDetails().error().stackTrace()));
-                        SneakyThrow.sneakyThrow(original);
+                        original.setStackTrace(ExceptionHelper.deserializeStackTrace(errorObject.stackTrace()));
+                        ExceptionHelper.sneakyThrow(original);
                     }
                 }
             } catch (ClassNotFoundException e) {
@@ -353,13 +346,7 @@ public class StepOperation<T> implements DurableOperation<T> {
             }
 
             // Fallback: wrap in StepFailedException
-            throw new StepFailedException(
-                    String.format(
-                            "Step failed with error of type %s. Message: %s",
-                            errorType, op.stepDetails().error().errorMessage()),
-                    null,
-                    StepFailedException.deserializeStackTrace(
-                            op.stepDetails().error().stackTrace()));
+            throw new StepFailedException(op);
         }
     }
 }

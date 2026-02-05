@@ -145,9 +145,8 @@ public class CallbackOperation<T> implements DurableOperation<T> {
                     throw e;
                 }
             }
-            case FAILED ->
-                throw new CallbackFailedException(op.callbackDetails().error());
-            case TIMED_OUT -> throw new CallbackTimeoutException(callbackId);
+            case FAILED -> throw new CallbackFailedException(op);
+            case TIMED_OUT -> throw new CallbackTimeoutException(callbackId, op);
             default -> throw new IllegalStateException("Unexpected callback status: " + op.status());
         };
     }

@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 package com.amazonaws.lambda.durable;
 
+import com.amazonaws.lambda.durable.exception.DurableOperationException;
 import com.amazonaws.lambda.durable.execution.ExecutionManager;
 import com.amazonaws.lambda.durable.execution.SuspendExecutionException;
 import com.amazonaws.lambda.durable.model.DurableExecutionInput;
 import com.amazonaws.lambda.durable.model.DurableExecutionOutput;
 import com.amazonaws.lambda.durable.serde.SerDes;
+import com.amazonaws.lambda.durable.util.ExceptionHelper;
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
 import java.nio.charset.StandardCharsets;
@@ -14,6 +16,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.function.BiFunction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import software.amazon.awssdk.services.lambda.model.ErrorObject;
 import software.amazon.awssdk.services.lambda.model.Operation;
 import software.amazon.awssdk.services.lambda.model.OperationAction;
 import software.amazon.awssdk.services.lambda.model.OperationType;
@@ -121,13 +124,13 @@ public class DurableExecutor {
             logger.debug("Execution completed");
             return DurableExecutionOutput.success(outputPayload);
         } catch (Exception e) {
-            Throwable cause = e.getCause() != null ? e.getCause() : e;
+            Throwable cause = ExceptionHelper.unwrapCompletableFuture(e);
             if (cause instanceof SuspendExecutionException) {
                 logger.debug("Execution suspended");
                 return DurableExecutionOutput.pending();
             }
             logger.debug("Execution failed: {}", cause.getMessage());
-            return DurableExecutionOutput.failure(cause, serDes);
+            return DurableExecutionOutput.failure(buildErrorObject(cause, serDes));
         } finally {
             // We shutdown the execution to make sure remaining checkpoint calls in the queue are drained
             executionManager.shutdown();
@@ -136,6 +139,15 @@ public class DurableExecutor {
             // For example, a re-invoke after a wait should re-use the same executor instance from DurableConfig.
             // userExecutor.shutdown();
         }
+    }
+
+    private static ErrorObject buildErrorObject(Throwable e, SerDes serDes) {
+        // exceptions thrown from operations, e.g. Step
+        if (e instanceof DurableOperationException) {
+            return ((DurableOperationException) e).getErrorObject();
+        }
+        // exceptions thrown from non-operation code
+        return ExceptionHelper.buildErrorObject(e, serDes);
     }
 
     private static <I> I extractUserInput(Operation executionOp, SerDes serDes, Class<I> inputType) {
