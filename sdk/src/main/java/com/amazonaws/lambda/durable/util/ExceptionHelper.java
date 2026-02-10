@@ -10,6 +10,7 @@ import software.amazon.awssdk.services.lambda.model.ErrorObject;
 
 /** Utility class for handling exceptions */
 public class ExceptionHelper {
+
     /**
      * Throws any exception as if it were unchecked using type erasure. This preserves the original exception type and
      * stack trace.

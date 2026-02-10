@@ -3,6 +3,7 @@
 package com.amazonaws.lambda.durable.execution;
 
 import com.amazonaws.lambda.durable.client.DurableExecutionClient;
+import com.amazonaws.lambda.durable.exception.UnrecoverableDurableExecutionException;
 import com.amazonaws.lambda.durable.model.DurableExecutionInput.InitialExecutionState;
 import java.time.Duration;
 import java.time.Instant;
@@ -52,7 +53,7 @@ public class ExecutionManager {
     private final Map<String, ThreadType> activeThreads = Collections.synchronizedMap(new HashMap<>());
     private static final ThreadLocal<OperationContext> currentContext = new ThreadLocal<>();
     private final Map<String, Phaser> openPhasers = Collections.synchronizedMap(new HashMap<>());
-    private final CompletableFuture<Void> suspendExecutionFuture = new CompletableFuture<>();
+    private final CompletableFuture<Void> executionExceptionFuture = new CompletableFuture<>();
 
     // ===== Checkpoint Batching =====
     private final CheckpointBatcher checkpointBatcher;
@@ -110,10 +111,6 @@ public class ExecutionManager {
         }
     }
 
-    public Operation getOperation(String operationId) {
-        return operations.get(operationId);
-    }
-
     /**
      * Gets an operation by ID and updates replay state. Transitions from REPLAY to EXECUTION mode if the operation is
      * not found or is not in a terminal state (still in progress).
@@ -123,9 +120,11 @@ public class ExecutionManager {
      */
     public Operation getOperationAndUpdateReplayState(String operationId) {
         var existing = operations.get(operationId);
-        if (existing == null || !isTerminalStatus(existing.status())) {
-            if (executionMode.compareAndSet(ExecutionMode.REPLAY, ExecutionMode.EXECUTION)) {
-                logger.debug("Transitioned to EXECUTION mode at operation '{}'", operationId);
+        if (executionMode.get() == ExecutionMode.REPLAY) {
+            if (existing == null || !isTerminalStatus(existing.status())) {
+                if (executionMode.compareAndSet(ExecutionMode.REPLAY, ExecutionMode.EXECUTION)) {
+                    logger.debug("Transitioned to EXECUTION mode at operation '{}'", operationId);
+                }
             }
         }
         return existing;
@@ -136,21 +135,6 @@ public class ExecutionManager {
     }
 
     // ===== Thread Coordination =====
-
-    public void registerActiveThreadWithContext(String threadId, ThreadType threadType) {
-        if (activeThreads.containsKey(threadId)) {
-            logger.trace("Thread '{}' ({}) already registered as active", threadId, threadType);
-            return;
-        }
-        activeThreads.put(threadId, threadType);
-        currentContext.set(new OperationContext(threadId, threadType));
-        logger.trace(
-                "Registered thread '{}' ({}) as active. Active threads: {}",
-                threadId,
-                threadType,
-                activeThreads.size());
-    }
-
     /**
      * Registers a thread as active without setting the thread local OperationContext. Use this when registration must
      * happen on a different thread than execution. Call setCurrentContext() on the execution thread to set the local
@@ -184,9 +168,9 @@ public class ExecutionManager {
         return currentContext.get();
     }
 
-    public void deregisterActiveThread(String threadId) {
+    public void deregisterActiveThreadAndUnsetCurrentContext(String threadId) {
         // Skip if already suspended
-        if (suspendExecutionFuture.isDone()) {
+        if (executionExceptionFuture.isDone()) {
             return;
         }
 
@@ -201,8 +185,7 @@ public class ExecutionManager {
 
         if (activeThreads.isEmpty()) {
             logger.info("No active threads remaining - suspending execution");
-            suspendExecutionFuture.complete(null);
-            throw new SuspendExecutionException();
+            suspendExecution();
         }
     }
 
@@ -245,7 +228,7 @@ public class ExecutionManager {
 
             // Poll while phaser is in phase 0
             while (this.getPhaser(operationId).getPhase() == ExecutionPhase.RUNNING.getValue()) {
-                if (suspendExecutionFuture.isDone()) {
+                if (executionExceptionFuture.isDone()) {
                     logger.debug("Polling for '{}': execution suspended, stopping", operationId);
                     return;
                 }
@@ -285,7 +268,7 @@ public class ExecutionManager {
 
             // Poll while future is not done
             while (!future.isDone()) {
-                if (suspendExecutionFuture.isDone()) {
+                if (executionExceptionFuture.isDone()) {
                     logger.debug("Polling for '{}': execution suspended, stopping", operationId);
                     return;
                 }
@@ -294,7 +277,7 @@ public class ExecutionManager {
                 sendOperationUpdate(null).join();
 
                 // Check if operation is now READY
-                var op = getOperation(operationId);
+                var op = getOperationAndUpdateReplayState(operationId);
                 if (op != null && op.status() == OperationStatus.READY) {
                     future.complete(null);
                     break;
@@ -313,11 +296,6 @@ public class ExecutionManager {
     }
 
     // ===== Utilities =====
-
-    public CompletableFuture<Void> getSuspendExecutionFuture() {
-        return suspendExecutionFuture;
-    }
-
     public void shutdown() {
         checkpointBatcher.shutdown();
     }
@@ -328,5 +306,35 @@ public class ExecutionManager {
                 || status == OperationStatus.CANCELLED
                 || status == OperationStatus.TIMED_OUT
                 || status == OperationStatus.STOPPED;
+    }
+
+    public void terminateExecution(UnrecoverableDurableExecutionException exception) {
+        executionExceptionFuture.completeExceptionally(exception);
+        throw exception;
+    }
+
+    public void suspendExecution() {
+        var ex = new SuspendExecutionException();
+        executionExceptionFuture.completeExceptionally(ex);
+        throw ex;
+    }
+
+    /**
+     * return a future that completes when userFuture completes successfully or the execution is terminated or
+     * suspended.
+     *
+     * @param userFuture user provided function
+     * @return a future of userFuture result if userFuture completes successfully, a user exception if userFuture
+     *     completes with an exception, a SuspendExecutionException if the execution is suspended, or an
+     *     UnrecoverableDurableExecutionException if the execution is terminated.
+     */
+    public <T> CompletableFuture<T> runUntilCompleteOrSuspend(CompletableFuture<T> userFuture) {
+        return CompletableFuture.anyOf(userFuture, executionExceptionFuture).thenApply(v -> {
+            // reaches here only if userFuture complete successfully
+            if (userFuture.isDone()) {
+                return userFuture.join();
+            }
+            return null;
+        });
     }
 }
