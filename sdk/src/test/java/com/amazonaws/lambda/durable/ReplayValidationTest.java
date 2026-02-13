@@ -32,7 +32,10 @@ class ReplayValidationTest {
         var initialExecutionState =
                 CheckpointUpdatedExecutionState.builder().operations(operations).build();
         var executionManager = new ExecutionManager(
-                "arn:aws:lambda:us-east-1:123456789012:function:test", "test-token", initialExecutionState, client);
+                "arn:aws:lambda:us-east-1:123456789012:function:test",
+                "test-token",
+                initialExecutionState,
+                DurableConfig.builder().withDurableExecutionClient(client).build());
         return new DurableContext(executionManager, DurableConfig.builder().build(), null);
     }
 

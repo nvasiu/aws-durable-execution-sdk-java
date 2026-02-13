@@ -54,10 +54,7 @@ public class DurableExecutor {
         }
 
         var executionManager = new ExecutionManager(
-                input.durableExecutionArn(),
-                input.checkpointToken(),
-                input.initialExecutionState(),
-                config.getDurableExecutionClient());
+                input.durableExecutionArn(), input.checkpointToken(), input.initialExecutionState(), config);
 
         logger.debug(
                 "EXECUTION operation found: {}",

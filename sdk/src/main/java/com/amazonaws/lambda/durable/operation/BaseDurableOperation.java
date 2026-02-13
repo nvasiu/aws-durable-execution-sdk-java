@@ -14,7 +14,6 @@ import com.amazonaws.lambda.durable.execution.ThreadType;
 import com.amazonaws.lambda.durable.serde.SerDes;
 import com.amazonaws.lambda.durable.util.ExceptionHelper;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Phaser;
@@ -205,12 +204,12 @@ public abstract class BaseDurableOperation<T> implements DurableFuture<T> {
     }
 
     // polling and checkpointing
-    protected void pollForOperationUpdates(Instant firstPoll, Duration duration) {
-        executionManager.pollForOperationUpdates(operationId, firstPoll, duration);
+    protected CompletableFuture<Operation> pollForOperationUpdates() {
+        return executionManager.pollForOperationUpdates(operationId);
     }
 
-    protected void pollUntilReady(CompletableFuture<Void> pendingFuture, Instant firstPoll, Duration duration) {
-        executionManager.pollUntilReady(operationId, pendingFuture, firstPoll, duration);
+    protected CompletableFuture<Operation> pollForOperationUpdates(Duration delay) {
+        return executionManager.pollForOperationUpdates(operationId, delay);
     }
 
     protected void sendOperationUpdate(OperationUpdate.Builder builder) {
@@ -248,9 +247,12 @@ public abstract class BaseDurableOperation<T> implements DurableFuture<T> {
     }
 
     protected Throwable deserializeException(ErrorObject errorObject) {
+        Throwable original = null;
+        if (errorObject == null) {
+            return original;
+        }
         var errorType = errorObject.errorType();
         var errorData = errorObject.errorData();
-        Throwable original = null;
 
         if (errorType == null) {
             return original;

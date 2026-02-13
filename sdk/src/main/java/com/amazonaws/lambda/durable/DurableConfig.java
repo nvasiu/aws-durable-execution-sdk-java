@@ -7,6 +7,7 @@ import com.amazonaws.lambda.durable.client.LambdaDurableFunctionsClient;
 import com.amazonaws.lambda.durable.logging.LoggerConfig;
 import com.amazonaws.lambda.durable.serde.JacksonSerDes;
 import com.amazonaws.lambda.durable.serde.SerDes;
+import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -67,6 +68,8 @@ public final class DurableConfig {
     private final SerDes serDes;
     private final ExecutorService executorService;
     private final LoggerConfig loggerConfig;
+    private final Duration pollingInterval;
+    private final Duration checkpointDelay;
 
     private DurableConfig(Builder builder) {
         this.durableExecutionClient = builder.durableExecutionClient != null
@@ -75,6 +78,8 @@ public final class DurableConfig {
         this.serDes = builder.serDes != null ? builder.serDes : new JacksonSerDes();
         this.executorService = builder.executorService != null ? builder.executorService : createDefaultExecutor();
         this.loggerConfig = builder.loggerConfig != null ? builder.loggerConfig : LoggerConfig.defaults();
+        this.pollingInterval = builder.pollingInterval != null ? builder.pollingInterval : Duration.ofMillis(1000);
+        this.checkpointDelay = builder.checkpointDelay != null ? builder.checkpointDelay : Duration.ofSeconds(0);
     }
 
     /**
@@ -129,6 +134,24 @@ public final class DurableConfig {
      */
     public LoggerConfig getLoggerConfig() {
         return loggerConfig;
+    }
+
+    /**
+     * Gets the configured polling interval.
+     *
+     * @return polling interval in Duration.
+     */
+    public Duration getPollingInterval() {
+        return pollingInterval;
+    }
+
+    /**
+     * Gets the configured checkpoint delay.
+     *
+     * @return check point in Duration.
+     */
+    public Duration getCheckpointDelay() {
+        return checkpointDelay;
     }
 
     /**
@@ -195,6 +218,8 @@ public final class DurableConfig {
         private SerDes serDes;
         private ExecutorService executorService;
         private LoggerConfig loggerConfig;
+        private Duration pollingInterval;
+        private Duration checkpointDelay;
 
         private Builder() {}
 
@@ -277,6 +302,29 @@ public final class DurableConfig {
          */
         public Builder withLoggerConfig(LoggerConfig loggerConfig) {
             this.loggerConfig = Objects.requireNonNull(loggerConfig, "LoggerConfig cannot be null");
+            return this;
+        }
+
+        /**
+         * Sets how often the SDK polls updates from backend.
+         *
+         * @param duration the polling interval in Duration
+         * @return This builder
+         */
+        public Builder withPollingInterval(Duration duration) {
+            this.pollingInterval = duration;
+            return this;
+        }
+
+        /**
+         * Sets how often the SDK checkpoints updates to backend. If not set, defaults to 0, which disables checkpoint
+         * batching.
+         *
+         * @param duration the checkpoint delay in Duration
+         * @return This builder
+         */
+        public Builder withCheckpointDelay(Duration duration) {
+            this.checkpointDelay = duration;
             return this;
         }
 
