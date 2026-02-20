@@ -46,6 +46,7 @@ public abstract class BaseDurableOperation<T> implements DurableFuture<T> {
 
     private final String operationId;
     private final String name;
+    private final String parentId;
     private final OperationType operationType;
     private final ExecutionManager executionManager;
     private final TypeToken<T> resultTypeToken;
@@ -58,9 +59,11 @@ public abstract class BaseDurableOperation<T> implements DurableFuture<T> {
             OperationType operationType,
             TypeToken<T> resultTypeToken,
             SerDes resultSerDes,
-            ExecutionManager executionManager) {
+            ExecutionManager executionManager,
+            String parentId) {
         this.operationId = operationId;
         this.name = name;
+        this.parentId = parentId;
         this.operationType = operationType;
         this.executionManager = executionManager;
         this.resultTypeToken = resultTypeToken;
@@ -70,6 +73,17 @@ public abstract class BaseDurableOperation<T> implements DurableFuture<T> {
 
         // register this operation in ExecutionManager so that the operation can receive updates from ExecutionManager
         executionManager.registerOperation(this);
+    }
+
+    /** Convenience constructor for root-context operations where parentId is null. */
+    public BaseDurableOperation(
+            String operationId,
+            String name,
+            OperationType operationType,
+            TypeToken<T> resultTypeToken,
+            SerDes resultSerDes,
+            ExecutionManager executionManager) {
+        this(operationId, name, operationType, resultTypeToken, resultSerDes, executionManager, null);
     }
 
     /** Gets the unique identifier for this operation. */
@@ -82,6 +96,11 @@ public abstract class BaseDurableOperation<T> implements DurableFuture<T> {
         return name;
     }
 
+    /** Gets the parent context ID. Null for root-context operations, set for child context operations. */
+    protected String getParentId() {
+        return parentId;
+    }
+
     /** Gets the operation type */
     public OperationType getType() {
         return operationType;
@@ -92,7 +111,7 @@ public abstract class BaseDurableOperation<T> implements DurableFuture<T> {
 
     /**
      * Gets the Operation from ExecutionManager and update the replay state from REPLAY to EXECUTE if operation is not
-     * found
+     * found. Operation IDs are globally unique (prefixed for child contexts), so no parentId is needed for lookups.
      *
      * @return the operation if found, otherwise null
      */
@@ -220,11 +239,10 @@ public abstract class BaseDurableOperation<T> implements DurableFuture<T> {
     }
 
     protected CompletableFuture<Void> sendOperationUpdateAsync(OperationUpdate.Builder builder) {
-        // todo: add parentId when we support operations in child context
         return executionManager.sendOperationUpdate(builder.id(operationId)
                 .name(name)
                 .type(operationType)
-                .parentId(null)
+                .parentId(parentId)
                 .build());
     }
 

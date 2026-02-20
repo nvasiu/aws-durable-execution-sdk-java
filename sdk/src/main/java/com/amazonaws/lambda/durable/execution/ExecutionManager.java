@@ -10,6 +10,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
@@ -35,6 +36,9 @@ import software.amazon.awssdk.services.lambda.model.OperationUpdate;
  *
  * <p>This is the single entry point for all execution coordination. Internal coordination (polling, checkpointing) uses
  * a dedicated SDK thread pool, while user-defined operations run on a customer-configured executor.
+ *
+ * <p>Operations are keyed by their globally unique operation ID. Child context operations use prefixed IDs (e.g.,
+ * "1-1", "1-2") to avoid collisions with root-level operations.
  *
  * @see InternalExecutor
  */
@@ -107,19 +111,17 @@ public class ExecutionManager {
     }
 
     /**
-     * Gets an operation by ID and updates replay state. Transitions from REPLAY to EXECUTION mode if the operation is
-     * not found or is not in a terminal state (still in progress).
+     * Gets an operation by its globally unique operationId, and updates replay state. Transitions from REPLAY to
+     * EXECUTION mode if the operation is not found or is not in a terminal state (still in progress).
      *
-     * @param operationId the operation ID to get
+     * @param operationId the globally unique operation ID (e.g., "1" for root, "1-1" for child context)
      * @return the existing operation, or null if not found (first execution)
      */
     public Operation getOperationAndUpdateReplayState(String operationId) {
         var existing = operationStorage.get(operationId);
-        if (executionMode.get() == ExecutionMode.REPLAY) {
-            if (existing == null || !isTerminalStatus(existing.status())) {
-                if (executionMode.compareAndSet(ExecutionMode.REPLAY, ExecutionMode.EXECUTION)) {
-                    logger.debug("Transitioned to EXECUTION mode at operation '{}'", operationId);
-                }
+        if (executionMode.get() == ExecutionMode.REPLAY && (existing == null || !isTerminalStatus(existing.status()))) {
+            if (executionMode.compareAndSet(ExecutionMode.REPLAY, ExecutionMode.EXECUTION)) {
+                logger.debug("Transitioned to EXECUTION mode at operation '{}'", operationId);
             }
         }
         return existing;
@@ -127,6 +129,17 @@ public class ExecutionManager {
 
     public Operation getExecutionOperation() {
         return operationStorage.get(executionOperationId);
+    }
+
+    /**
+     * Checks whether there are any cached operations for the given parent context ID. Used to initialize per-context
+     * replay state — a context starts in replay mode if the ExecutionManager has cached operations belonging to it.
+     *
+     * @param parentId the context ID to check (null for root context)
+     * @return true if at least one operation exists with the given parentId
+     */
+    public boolean hasOperationsForContext(String parentId) {
+        return operationStorage.values().stream().anyMatch(op -> Objects.equals(op.parentId(), parentId));
     }
 
     // ===== Thread Coordination =====
