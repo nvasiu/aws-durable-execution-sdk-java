@@ -10,8 +10,6 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 import org.slf4j.LoggerFactory;
 import software.amazon.lambda.durable.execution.ExecutionManager;
-import software.amazon.lambda.durable.execution.ThreadContext;
-import software.amazon.lambda.durable.execution.ThreadType;
 import software.amazon.lambda.durable.logging.DurableLogger;
 import software.amazon.lambda.durable.operation.CallbackOperation;
 import software.amazon.lambda.durable.operation.ChildContextOperation;
@@ -20,28 +18,15 @@ import software.amazon.lambda.durable.operation.StepOperation;
 import software.amazon.lambda.durable.operation.WaitOperation;
 import software.amazon.lambda.durable.validation.ParameterValidator;
 
-public class DurableContext {
-    private static final String ROOT_CONTEXT = "Root";
-
-    private final ExecutionManager executionManager;
-    private final DurableConfig durableConfig;
-    private final Context lambdaContext;
+public class DurableContext extends BaseContext {
     private final AtomicInteger operationCounter;
     private final DurableLogger logger;
-    private final ExecutionContext executionContext;
-    private final String contextId;
-    private boolean isReplaying;
 
-    /** Shared initialization — sets all fields but performs no thread registration. */
+    /** Shared initialization — sets all fields. */
     private DurableContext(
             ExecutionManager executionManager, DurableConfig durableConfig, Context lambdaContext, String contextId) {
-        this.executionManager = executionManager;
-        this.durableConfig = durableConfig;
-        this.lambdaContext = lambdaContext;
-        this.contextId = contextId;
+        super(executionManager, durableConfig, lambdaContext, contextId);
         this.operationCounter = new AtomicInteger(0);
-        this.executionContext = new ExecutionContext(executionManager.getDurableExecutionArn());
-        this.isReplaying = executionManager.hasOperationsForContext(contextId);
 
         var requestId = lambdaContext != null ? lambdaContext.getAwsRequestId() : null;
         this.logger = new DurableLogger(
@@ -52,41 +37,90 @@ public class DurableContext {
     }
 
     /**
-     * Creates a root context and registers the current thread for execution coordination.
+     * Creates a root context (contextId = null)
      *
-     * <p>The context itself always has a null contextId (making it a root context). The thread is registered with the
-     * ExecutionManager using the default {@link #ROOT_CONTEXT} identifier.
+     * <p>The context itself always has a null contextId (making it a root context).
      *
      * @param executionManager the execution manager
      * @param durableConfig the durable configuration
      * @param lambdaContext the Lambda context
      * @return a new root DurableContext
      */
-    static DurableContext createRootContext(
+    public static DurableContext createRootContext(
             ExecutionManager executionManager, DurableConfig durableConfig, Context lambdaContext) {
-        var ctx = new DurableContext(executionManager, durableConfig, lambdaContext, null);
-        executionManager.registerActiveThread(ROOT_CONTEXT);
-        executionManager.setCurrentThreadContext(new ThreadContext(ROOT_CONTEXT, ThreadType.CONTEXT));
-        return ctx;
+        return new DurableContext(executionManager, durableConfig, lambdaContext, null);
     }
 
     /**
-     * Creates a child context without registering the current thread. Thread registration is handled by
-     * ChildContextOperation, which registers on the parent thread before the executor runs and sets the context on the
-     * child thread inside the executor.
+     * Creates a child context.
      *
-     * @param executionManager the execution manager
-     * @param durableConfig the durable configuration
-     * @param lambdaContext the Lambda context
-     * @param contextId the child context's ID (the CONTEXT operation's operation ID)
+     * @param childContextId the child context's ID (the CONTEXT operation's operation ID)
      * @return a new DurableContext for the child context
      */
-    public static DurableContext createChildContext(
-            ExecutionManager executionManager, DurableConfig durableConfig, Context lambdaContext, String contextId) {
-        return new DurableContext(executionManager, durableConfig, lambdaContext, contextId);
+    public DurableContext createChildContext(String childContextId) {
+        return new DurableContext(executionManager, getDurableConfig(), getLambdaContext(), childContextId);
+    }
+
+    /**
+     * Creates a step context for executing step operations.
+     *
+     * @param stepOperationId the ID of the step operation (used for thread registration)
+     * @return a new StepContext instance
+     */
+    public StepContext createStepContext(String stepOperationId) {
+        return new StepContext(executionManager, getDurableConfig(), getLambdaContext(), stepOperationId);
     }
 
     // ========== step methods ==========
+
+    public <T> T step(String name, Class<T> resultType, Function<StepContext, T> func) {
+        return step(name, TypeToken.get(resultType), func, StepConfig.builder().build());
+    }
+
+    public <T> T step(String name, Class<T> resultType, Function<StepContext, T> func, StepConfig config) {
+        // Simply delegate to stepAsync and block on the result
+        return stepAsync(name, resultType, func, config).get();
+    }
+
+    public <T> T step(String name, TypeToken<T> typeToken, Function<StepContext, T> func) {
+        return step(name, typeToken, func, StepConfig.builder().build());
+    }
+
+    public <T> T step(String name, TypeToken<T> typeToken, Function<StepContext, T> func, StepConfig config) {
+        // Simply delegate to stepAsync and block on the result
+        return stepAsync(name, typeToken, func, config).get();
+    }
+
+    public <T> DurableFuture<T> stepAsync(String name, Class<T> resultType, Function<StepContext, T> func) {
+        return stepAsync(
+                name, TypeToken.get(resultType), func, StepConfig.builder().build());
+    }
+
+    public <T> DurableFuture<T> stepAsync(
+            String name, Class<T> resultType, Function<StepContext, T> func, StepConfig config) {
+        return stepAsync(name, TypeToken.get(resultType), func, config);
+    }
+
+    public <T> DurableFuture<T> stepAsync(String name, TypeToken<T> typeToken, Function<StepContext, T> func) {
+        return stepAsync(name, typeToken, func, StepConfig.builder().build());
+    }
+
+    public <T> DurableFuture<T> stepAsync(
+            String name, TypeToken<T> typeToken, Function<StepContext, T> func, StepConfig config) {
+        Objects.requireNonNull(config, "config cannot be null");
+        Objects.requireNonNull(typeToken, "typeToken cannot be null");
+        if (config.serDes() == null) {
+            config = config.toBuilder().serDes(getDurableConfig().getSerDes()).build();
+        }
+        var operationId = nextOperationId();
+
+        // Create and start step operation with TypeToken
+        var operation = new StepOperation<>(operationId, name, func, typeToken, config, this);
+
+        operation.execute(); // Start the step (returns immediately)
+
+        return operation;
+    }
 
     public <T> T step(String name, Class<T> resultType, Supplier<T> func) {
         return step(name, TypeToken.get(resultType), func, StepConfig.builder().build());
@@ -120,20 +154,7 @@ public class DurableContext {
     }
 
     public <T> DurableFuture<T> stepAsync(String name, TypeToken<T> typeToken, Supplier<T> func, StepConfig config) {
-        Objects.requireNonNull(config, "config cannot be null");
-        Objects.requireNonNull(typeToken, "typeToken cannot be null");
-        if (config.serDes() == null) {
-            config = config.toBuilder().serDes(durableConfig.getSerDes()).build();
-        }
-        var operationId = nextOperationId();
-
-        // Create and start step operation with TypeToken
-        var operation = new StepOperation<>(
-                operationId, name, func, typeToken, config, executionManager, logger, durableConfig, contextId);
-
-        operation.execute(); // Start the step (returns immediately)
-
-        return operation;
+        return stepAsync(name, typeToken, stepContext -> func.get(), config);
     }
 
     // ========== wait methods ==========
@@ -147,7 +168,7 @@ public class DurableContext {
         var operationId = nextOperationId();
 
         // Create and start wait operation
-        var operation = new WaitOperation(operationId, waitName, duration, executionManager, contextId);
+        var operation = new WaitOperation(operationId, waitName, duration, this);
 
         operation.execute(); // Checkpoint the wait
         return operation.get(); // Block (will throw SuspendExecutionException if needed)
@@ -208,16 +229,17 @@ public class DurableContext {
         Objects.requireNonNull(config, "config cannot be null");
         Objects.requireNonNull(typeToken, "typeToken cannot be null");
         if (config.serDes() == null) {
-            config = config.toBuilder().serDes(durableConfig.getSerDes()).build();
+            config = config.toBuilder().serDes(getDurableConfig().getSerDes()).build();
         }
         if (config.payloadSerDes() == null) {
-            config = config.toBuilder().payloadSerDes(durableConfig.getSerDes()).build();
+            config = config.toBuilder()
+                    .payloadSerDes(getDurableConfig().getSerDes())
+                    .build();
         }
         var operationId = nextOperationId();
 
         // Create and start invoke operation
-        var operation = new InvokeOperation<>(
-                operationId, name, functionName, payload, typeToken, config, executionManager, contextId);
+        var operation = new InvokeOperation<>(operationId, name, functionName, payload, typeToken, config, this);
 
         operation.execute(); // checkpoint the invoke operation
         return operation; // Block (will throw SuspendExecutionException if needed)
@@ -239,11 +261,11 @@ public class DurableContext {
 
     public <T> DurableCallbackFuture<T> createCallback(String name, TypeToken<T> typeToken, CallbackConfig config) {
         if (config.serDes() == null) {
-            config = config.toBuilder().serDes(durableConfig.getSerDes()).build();
+            config = config.toBuilder().serDes(getDurableConfig().getSerDes()).build();
         }
         var operationId = nextOperationId();
 
-        var operation = new CallbackOperation<>(operationId, name, typeToken, config, executionManager, contextId);
+        var operation = new CallbackOperation<>(operationId, name, typeToken, config, this);
         operation.execute();
 
         return operation;
@@ -270,60 +292,20 @@ public class DurableContext {
         var operationId = nextOperationId();
 
         var operation = new ChildContextOperation<>(
-                operationId,
-                name,
-                func,
-                typeToken,
-                durableConfig.getSerDes(),
-                executionManager,
-                durableConfig,
-                lambdaContext,
-                contextId);
+                operationId, name, func, typeToken, getDurableConfig().getSerDes(), this);
 
         operation.execute();
         return operation;
     }
 
     // =============== accessors ================
-
-    public Context getLambdaContext() {
-        return lambdaContext;
-    }
-
+    /**
+     * Returns a logger with execution context information for replay-aware logging.
+     *
+     * @return the durable logger
+     */
     public DurableLogger getLogger() {
         return logger;
-    }
-
-    /**
-     * Returns metadata about the current durable execution.
-     *
-     * <p>The execution context provides information that remains constant throughout the execution lifecycle, such as
-     * the durable execution ARN. This is useful for tracking execution progress, correlating logs, and referencing this
-     * execution in external systems.
-     *
-     * @return the execution context
-     */
-    public ExecutionContext getExecutionContext() {
-        return executionContext;
-    }
-
-    // ============= internal utilities ===============
-
-    /** Gets the context ID for this context. Null for root context, set for child contexts. */
-    String getContextId() {
-        return contextId;
-    }
-
-    /** Returns whether this context is currently in replay mode. */
-    boolean isReplaying() {
-        return isReplaying;
-    }
-
-    /**
-     * Transitions this context from replay to execution mode. Called when the first un-cached operation is encountered.
-     */
-    void setExecutionMode() {
-        this.isReplaying = false;
     }
 
     /**
@@ -333,6 +315,6 @@ public class DurableContext {
      */
     private String nextOperationId() {
         var counter = String.valueOf(operationCounter.incrementAndGet());
-        return contextId != null ? contextId + "-" + counter : counter;
+        return getContextId() != null ? getContextId() + "-" + counter : counter;
     }
 }

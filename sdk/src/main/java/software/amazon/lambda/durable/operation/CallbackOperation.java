@@ -2,23 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 package software.amazon.lambda.durable.operation;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.lambda.model.CallbackOptions;
 import software.amazon.awssdk.services.lambda.model.OperationAction;
 import software.amazon.awssdk.services.lambda.model.OperationType;
 import software.amazon.awssdk.services.lambda.model.OperationUpdate;
 import software.amazon.lambda.durable.CallbackConfig;
 import software.amazon.lambda.durable.DurableCallbackFuture;
+import software.amazon.lambda.durable.DurableContext;
 import software.amazon.lambda.durable.TypeToken;
 import software.amazon.lambda.durable.exception.CallbackFailedException;
 import software.amazon.lambda.durable.exception.CallbackTimeoutException;
-import software.amazon.lambda.durable.execution.ExecutionManager;
 
 /** Durable operation for creating and waiting on external callbacks. */
 public class CallbackOperation<T> extends BaseDurableOperation<T> implements DurableCallbackFuture<T> {
-
-    private static final Logger logger = LoggerFactory.getLogger(CallbackOperation.class);
 
     private final CallbackConfig config;
 
@@ -29,20 +25,9 @@ public class CallbackOperation<T> extends BaseDurableOperation<T> implements Dur
             String name,
             TypeToken<T> resultTypeToken,
             CallbackConfig config,
-            ExecutionManager executionManager,
-            String parentId) {
-        super(operationId, name, OperationType.CALLBACK, resultTypeToken, config.serDes(), executionManager, parentId);
+            DurableContext durableContext) {
+        super(operationId, name, OperationType.CALLBACK, resultTypeToken, config.serDes(), durableContext);
         this.config = config;
-    }
-
-    /** Convenience constructor for root-context operations where parentId is null. */
-    public CallbackOperation(
-            String operationId,
-            String name,
-            TypeToken<T> resultTypeToken,
-            CallbackConfig config,
-            ExecutionManager executionManager) {
-        this(operationId, name, resultTypeToken, config, executionManager, null);
     }
 
     public String callbackId() {
