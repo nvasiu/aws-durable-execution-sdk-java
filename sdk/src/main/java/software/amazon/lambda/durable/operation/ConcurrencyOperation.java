@@ -54,6 +54,7 @@ public abstract class ConcurrencyOperation<T> extends BaseDurableOperation<T> {
     private final Set<String> completedOperations = Collections.synchronizedSet(new HashSet<String>());
     private OperationIdGenerator operationIdGenerator;
     private final DurableContextImpl rootContext;
+    private ConcurrencyCompletionStatus completionStatus;
 
     protected ConcurrencyOperation(
             OperationIdentifier operationIdentifier,
@@ -203,9 +204,9 @@ public abstract class ConcurrencyOperation<T> extends BaseDurableOperation<T> {
             }
             runningCount.decrementAndGet();
 
-            var status = canComplete();
-            if (status != null) {
-                handleComplete(status);
+            this.completionStatus = canComplete();
+            if (this.completionStatus != null) {
+                handleComplete(this.completionStatus);
             } else {
                 executeNextItemIfAllowed();
             }
@@ -245,17 +246,13 @@ public abstract class ConcurrencyOperation<T> extends BaseDurableOperation<T> {
      * Blocks the calling thread until the concurrency operation reaches a terminal state. Validates item count, handles
      * zero-branch case, then delegates to {@code waitForOperationCompletion()} from BaseDurableOperation.
      */
-    protected void join() {
+    public void join() {
         validateItemCount();
         isJoined.set(true);
-        if (childOperations.isEmpty()) {
-            return;
-        }
-
         synchronized (this) {
-            var status = canComplete();
-            if (status != null) {
-                handleComplete(status);
+            this.completionStatus = canComplete();
+            if (this.completionStatus != null) {
+                handleComplete(this.completionStatus);
             }
         }
 
@@ -272,6 +269,10 @@ public abstract class ConcurrencyOperation<T> extends BaseDurableOperation<T> {
 
     protected int getTotalItems() {
         return childOperations.size();
+    }
+
+    protected ConcurrencyCompletionStatus getCompletionStatus() {
+        return completionStatus;
     }
 
     protected List<ChildContextOperation<?>> getChildOperations() {

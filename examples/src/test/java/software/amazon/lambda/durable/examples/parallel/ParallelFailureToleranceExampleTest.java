@@ -17,17 +17,14 @@ class ParallelFailureToleranceExampleTest {
         var runner = LocalDurableTestRunner.create(ParallelFailureToleranceExample.Input.class, handler);
 
         // 2 good services, 1 bad — toleratedFailureCount=1 so the parallel op still succeeds
-        var input = new ParallelFailureToleranceExample.Input(List.of("svc-a", "bad-svc-b", "svc-c"), 1);
+        var input = new ParallelFailureToleranceExample.Input(List.of("svc-a", "bad-svc-b", "svc-c"), 1, -1);
         var result = runner.runUntilComplete(input);
 
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
 
         var output = result.getResult(ParallelFailureToleranceExample.Output.class);
-        assertEquals(2, output.succeeded().size());
-        assertEquals(1, output.failed().size());
-        assertTrue(output.succeeded().contains("ok:svc-a"));
-        assertTrue(output.succeeded().contains("ok:svc-c"));
-        assertTrue(output.failed().contains("bad-svc-b"));
+        assertEquals(2, output.succeeded());
+        assertEquals(1, output.failed());
     }
 
     @Test
@@ -35,14 +32,13 @@ class ParallelFailureToleranceExampleTest {
         var handler = new ParallelFailureToleranceExample();
         var runner = LocalDurableTestRunner.create(ParallelFailureToleranceExample.Input.class, handler);
 
-        var input = new ParallelFailureToleranceExample.Input(List.of("svc-a", "svc-b", "svc-c"), 2);
+        var input = new ParallelFailureToleranceExample.Input(List.of("svc-a", "svc-b", "svc-c"), 2, -1);
         var result = runner.runUntilComplete(input);
 
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
 
         var output = result.getResult(ParallelFailureToleranceExample.Output.class);
-        assertEquals(3, output.succeeded().size());
-        assertTrue(output.failed().isEmpty());
+        assertEquals(3, output.succeeded());
     }
 
     @Test
@@ -51,13 +47,13 @@ class ParallelFailureToleranceExampleTest {
         var runner = LocalDurableTestRunner.create(ParallelFailureToleranceExample.Input.class, handler);
 
         // 2 bad services, toleratedFailureCount=1 — second failure exceeds tolerance
-        var input = new ParallelFailureToleranceExample.Input(List.of("svc-a", "bad-svc-b", "bad-svc-c"), 1);
+        var input = new ParallelFailureToleranceExample.Input(List.of("svc-a", "bad-svc-b", "bad-svc-c"), 1, 2);
         var result = runner.runUntilComplete(input);
 
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
 
         var output = result.getResult(ParallelFailureToleranceExample.Output.class);
-        assertEquals(2, output.failed().size());
-        assertEquals(1, output.succeeded().size());
+        assertEquals(2, output.failed());
+        assertEquals(1, output.succeeded());
     }
 }
