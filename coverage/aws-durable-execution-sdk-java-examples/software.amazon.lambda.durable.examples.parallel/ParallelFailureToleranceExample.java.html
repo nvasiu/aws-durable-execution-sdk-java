@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>ParallelFailureToleranceExample.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">AWS Lambda Durable Execution SDK Coverage Report</a> &gt; <a href="../index.html" class="el_bundle">aws-durable-execution-sdk-java-examples</a> &gt; <a href="index.source.html" class="el_package">software.amazon.lambda.durable.examples.parallel</a> &gt; <span class="el_source">ParallelFailureToleranceExample.java</span></div><h1>ParallelFailureToleranceExample.java</h1><pre class="source lang-java linenums">// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+package software.amazon.lambda.durable.examples.parallel;
+
+import java.util.ArrayList;
+import java.util.List;
+import software.amazon.lambda.durable.DurableContext;
+import software.amazon.lambda.durable.DurableFuture;
+import software.amazon.lambda.durable.DurableHandler;
+import software.amazon.lambda.durable.config.CompletionConfig;
+import software.amazon.lambda.durable.config.ParallelConfig;
+import software.amazon.lambda.durable.config.StepConfig;
+import software.amazon.lambda.durable.model.ParallelResult;
+import software.amazon.lambda.durable.retry.RetryStrategies;
+
+/**
+ * Example demonstrating parallel execution with failure tolerance.
+ *
+ * &lt;p&gt;When {@code toleratedFailureCount} is set, the parallel operation completes successfully even if some branches
+ * fail — as long as the number of failures does not exceed the threshold. Failed branches produce {@code null} results
+ * that callers can filter out.
+ *
+ * &lt;p&gt;Use this pattern when partial success is acceptable, for example: sending notifications to multiple channels where
+ * some channels may be unavailable.
+ */
+<span class="fc" id="L26">public class ParallelFailureToleranceExample</span>
+        extends DurableHandler&lt;ParallelFailureToleranceExample.Input, ParallelFailureToleranceExample.Output&gt; {
+
+<span class="fc" id="L29">    public record Input(List&lt;String&gt; services, Integer toleratedFailures, Integer minSuccessful) {}</span>
+
+<span class="fc" id="L31">    public record Output(int succeeded, int failed) {}</span>
+
+    @Override
+    public Output handleRequest(Input input, DurableContext context) {
+<span class="fc" id="L35">        var logger = context.getLogger();</span>
+<span class="fc" id="L36">        logger.info(&quot;Starting parallel execution with toleratedFailureCount={}&quot;, input.toleratedFailures());</span>
+
+<span class="fc" id="L38">        var config = ParallelConfig.builder()</span>
+<span class="fc" id="L39">                .completionConfig(new CompletionConfig(input.minSuccessful, input.toleratedFailures, null))</span>
+<span class="fc" id="L40">                .build();</span>
+
+<span class="fc" id="L42">        var futures = new ArrayList&lt;DurableFuture&lt;String&gt;&gt;(input.services().size());</span>
+<span class="fc" id="L43">        var parallel = context.parallel(&quot;call-services&quot;, config);</span>
+
+<span class="fc" id="L45">        try (parallel) {</span>
+<span class="fc bfc" id="L46" title="All 2 branches covered.">            for (var service : input.services()) {</span>
+<span class="fc" id="L47">                var future = parallel.branch(&quot;call-&quot; + service, String.class, branchCtx -&gt; {</span>
+<span class="fc" id="L48">                    return branchCtx.step(</span>
+                            &quot;invoke-&quot; + service,
+                            String.class,
+                            stepCtx -&gt; {
+<span class="fc bfc" id="L52" title="All 2 branches covered.">                                if (service.startsWith(&quot;bad-&quot;)) {</span>
+<span class="fc" id="L53">                                    throw new RuntimeException(&quot;Service unavailable: &quot; + service);</span>
+                                }
+<span class="fc" id="L55">                                return &quot;ok:&quot; + service;</span>
+                            },
+<span class="fc" id="L57">                            StepConfig.builder()</span>
+<span class="fc" id="L58">                                    .retryStrategy(RetryStrategies.Presets.NO_RETRY)</span>
+<span class="fc" id="L59">                                    .build());</span>
+                });
+<span class="fc" id="L61">                futures.add(future);</span>
+<span class="fc" id="L62">            }</span>
+        }
+
+<span class="fc" id="L65">        ParallelResult parallelResult = parallel.get();</span>
+<span class="fc" id="L66">        logger.info(</span>
+                &quot;Parallel complete: succeeded={}, failed={}, status={}&quot;,
+<span class="fc" id="L68">                parallelResult.succeeded(),</span>
+<span class="fc" id="L69">                parallelResult.failed(),</span>
+<span class="fc bfc" id="L70" title="All 2 branches covered.">                parallelResult.completionStatus().isSucceeded() ? &quot;succeeded&quot; : &quot;failed&quot;);</span>
+
+<span class="fc" id="L72">        var succeeded = parallelResult.succeeded();</span>
+<span class="fc" id="L73">        var failed = parallelResult.failed();</span>
+
+<span class="fc" id="L75">        logger.info(&quot;Completed: {} succeeded, {} failed&quot;, succeeded, failed);</span>
+<span class="fc" id="L76">        return new Output(succeeded, failed);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>
