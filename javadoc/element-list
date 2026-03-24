@@ -1,0 +1,15 @@
+software.amazon.lambda.durable
+software.amazon.lambda.durable.client
+software.amazon.lambda.durable.config
+software.amazon.lambda.durable.context
+software.amazon.lambda.durable.examples
+software.amazon.lambda.durable.examples.parallel
+software.amazon.lambda.durable.exception
+software.amazon.lambda.durable.execution
+software.amazon.lambda.durable.logging
+software.amazon.lambda.durable.model
+software.amazon.lambda.durable.operation
+software.amazon.lambda.durable.retry
+software.amazon.lambda.durable.serde
+software.amazon.lambda.durable.testing
+software.amazon.lambda.durable.util
