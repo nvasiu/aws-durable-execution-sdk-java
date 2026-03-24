@@ -8,7 +8,7 @@
 
 ### How it works
 
-1. User calls `ctx.waitForCondition(name, resultType, checkFunc, initialState)` (or with optional config)
+1. User calls `ctx.waitForCondition(name, resultType, checkFunc)` (or with optional config)
 2. A `WaitForConditionOperation` is created with a unique operation ID
 3. On first execution:
    - Checkpoint START with subtype `WAIT_FOR_CONDITION`
@@ -43,14 +43,14 @@ sdk/src/main/java/software/amazon/lambda/durable/
 
 ```
 DurableContext (interface)
-  ├── waitForCondition(name, Class<T>, checkFunc, initialState) → T
-  ├── waitForCondition(name, Class<T>, checkFunc, initialState, config) → T
-  ├── waitForCondition(name, TypeToken<T>, checkFunc, initialState) → T
-  ├── waitForCondition(name, TypeToken<T>, checkFunc, initialState, config) → T
-  ├── waitForConditionAsync(name, Class<T>, checkFunc, initialState) → DurableFuture<T>
-  ├── waitForConditionAsync(name, Class<T>, checkFunc, initialState, config) → DurableFuture<T>
-  ├── waitForConditionAsync(name, TypeToken<T>, checkFunc, initialState) → DurableFuture<T>
-  └── waitForConditionAsync(name, TypeToken<T>, checkFunc, initialState, config) → DurableFuture<T>
+  ├── waitForCondition(name, Class<T>, checkFunc) → T
+  ├── waitForCondition(name, Class<T>, checkFunc, config) → T
+  ├── waitForCondition(name, TypeToken<T>, checkFunc) → T
+  ├── waitForCondition(name, TypeToken<T>, checkFunc, config) → T
+  ├── waitForConditionAsync(name, Class<T>, checkFunc) → DurableFuture<T>
+  ├── waitForConditionAsync(name, Class<T>, checkFunc, config) → DurableFuture<T>
+  ├── waitForConditionAsync(name, TypeToken<T>, checkFunc) → DurableFuture<T>
+  └── waitForConditionAsync(name, TypeToken<T>, checkFunc, config) → DurableFuture<T>
          │
          ▼
 WaitForConditionOperation<T> extends BaseDurableOperation<T>
@@ -131,19 +131,21 @@ Validation: maxAttempts > 0, initialDelay >= 1s, maxDelay >= 1s, backoffRate >= 
 public class WaitForConditionConfig<T> {
     public static <T> Builder<T> builder();
 
-    public WaitForConditionWaitStrategy<T> waitStrategy();  // defaults to WaitStrategies.defaultStrategy()
+    public WaitForConditionWaitStrategy<T> waitStrategy();   // defaults to WaitStrategies.defaultStrategy()
     public SerDes serDes();                                  // defaults to null (uses handler default)
+    public T initialState();                                 // defaults to null
     public Builder<T> toBuilder();                           // for internal SerDes injection
 
     public static class Builder<T> {
         public Builder<T> waitStrategy(WaitForConditionWaitStrategy<T> waitStrategy);
         public Builder<T> serDes(SerDes serDes);
+        public Builder<T> initialState(T state);
         public WaitForConditionConfig<T> build();
     }
 }
 ```
 
-Holds only optional parameters. Required parameters (`initialState`, `checkFunc`) are direct method arguments on `DurableContext.waitForCondition()`.
+Holds only optional parameters. The required parameter `checkFunc` is direct method argument on `DurableContext.waitForCondition()`.
 
 ### DurableContext API (8 signatures)
 
@@ -151,9 +153,9 @@ Delegation chain (same pattern as `step()`):
 - All sync methods → corresponding async method → `.get()`
 - All Class-based methods → TypeToken-based via `TypeToken.get(resultType)`
 - All no-config methods → config method with `WaitForConditionConfig.builder().build()`
-- Core method: `waitForConditionAsync(name, TypeToken<T>, checkFunc, initialState, config)`
+- Core method: `waitForConditionAsync(name, TypeToken<T>, checkFunc, config)`
 
-The core method validates: `name` (via `ParameterValidator`), `typeToken` not null, `checkFunc` not null, `initialState` not null, `config` not null.
+The core method validates: `name` (via `ParameterValidator`), `typeToken` not null, `checkFunc` not null, `config` not null.
 
 ### WaitForConditionOperation\<T\>
 

@@ -628,19 +628,14 @@ public interface DurableContext extends BaseContext {
      * @param name the unique operation name within this context
      * @param resultType the result class for deserialization
      * @param checkFunc the function that evaluates the condition and returns a {@link WaitForConditionResult}
-     * @param initialState the initial state passed to the first check invocation
      * @return the final state value when the condition is met
      */
     default <T> T waitForCondition(
-            String name,
-            Class<T> resultType,
-            BiFunction<T, StepContext, WaitForConditionResult<T>> checkFunc,
-            T initialState) {
+            String name, Class<T> resultType, BiFunction<T, StepContext, WaitForConditionResult<T>> checkFunc) {
         return waitForConditionAsync(
                         name,
                         TypeToken.get(resultType),
                         checkFunc,
-                        initialState,
                         WaitForConditionConfig.<T>builder().build())
                 .get();
     }
@@ -650,23 +645,17 @@ public interface DurableContext extends BaseContext {
             String name,
             Class<T> resultType,
             BiFunction<T, StepContext, WaitForConditionResult<T>> checkFunc,
-            T initialState,
             WaitForConditionConfig<T> config) {
-        return waitForConditionAsync(name, resultType, checkFunc, initialState, config)
-                .get();
+        return waitForConditionAsync(name, resultType, checkFunc, config).get();
     }
 
     /** Polls a condition function until it signals done, using a {@link TypeToken}, blocking until complete. */
     default <T> T waitForCondition(
-            String name,
-            TypeToken<T> resultType,
-            BiFunction<T, StepContext, WaitForConditionResult<T>> checkFunc,
-            T initialState) {
+            String name, TypeToken<T> resultType, BiFunction<T, StepContext, WaitForConditionResult<T>> checkFunc) {
         return waitForConditionAsync(
                         name,
                         resultType,
                         checkFunc,
-                        initialState,
                         WaitForConditionConfig.<T>builder().build())
                 .get();
     }
@@ -679,23 +668,17 @@ public interface DurableContext extends BaseContext {
             String name,
             TypeToken<T> resultType,
             BiFunction<T, StepContext, WaitForConditionResult<T>> checkFunc,
-            T initialState,
             WaitForConditionConfig<T> config) {
-        return waitForConditionAsync(name, resultType, checkFunc, initialState, config)
-                .get();
+        return waitForConditionAsync(name, resultType, checkFunc, config).get();
     }
 
     /** Asynchronously polls a condition function until it signals done. */
     default <T> DurableFuture<T> waitForConditionAsync(
-            String name,
-            Class<T> resultType,
-            BiFunction<T, StepContext, WaitForConditionResult<T>> checkFunc,
-            T initialState) {
+            String name, Class<T> resultType, BiFunction<T, StepContext, WaitForConditionResult<T>> checkFunc) {
         return waitForConditionAsync(
                 name,
                 TypeToken.get(resultType),
                 checkFunc,
-                initialState,
                 WaitForConditionConfig.<T>builder().build());
     }
 
@@ -704,23 +687,15 @@ public interface DurableContext extends BaseContext {
             String name,
             Class<T> resultType,
             BiFunction<T, StepContext, WaitForConditionResult<T>> checkFunc,
-            T initialState,
             WaitForConditionConfig<T> config) {
-        return waitForConditionAsync(name, TypeToken.get(resultType), checkFunc, initialState, config);
+        return waitForConditionAsync(name, TypeToken.get(resultType), checkFunc, config);
     }
 
     /** Asynchronously polls a condition function until it signals done, using a {@link TypeToken}. */
     default <T> DurableFuture<T> waitForConditionAsync(
-            String name,
-            TypeToken<T> resultType,
-            BiFunction<T, StepContext, WaitForConditionResult<T>> checkFunc,
-            T initialState) {
+            String name, TypeToken<T> resultType, BiFunction<T, StepContext, WaitForConditionResult<T>> checkFunc) {
         return waitForConditionAsync(
-                name,
-                resultType,
-                checkFunc,
-                initialState,
-                WaitForConditionConfig.<T>builder().build());
+                name, resultType, checkFunc, WaitForConditionConfig.<T>builder().build());
     }
 
     /**
@@ -734,7 +709,6 @@ public interface DurableContext extends BaseContext {
      * @param name the unique operation name within this context
      * @param resultType the type token for deserialization of generic types
      * @param checkFunc the function that evaluates the condition and returns a {@link WaitForConditionResult}
-     * @param initialState the initial state passed to the first check invocation
      * @param config the waitForCondition configuration (wait strategy, custom SerDes)
      * @return a future representing the final state value
      */
@@ -742,7 +716,6 @@ public interface DurableContext extends BaseContext {
             String name,
             TypeToken<T> resultType,
             BiFunction<T, StepContext, WaitForConditionResult<T>> checkFunc,
-            T initialState,
             WaitForConditionConfig<T> config);
 
     /**

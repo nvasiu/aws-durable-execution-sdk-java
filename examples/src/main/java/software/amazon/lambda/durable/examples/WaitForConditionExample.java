@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 package software.amazon.lambda.durable.examples;
 
-import java.util.concurrent.atomic.AtomicInteger;
 import software.amazon.lambda.durable.DurableContext;
 import software.amazon.lambda.durable.DurableHandler;
+import software.amazon.lambda.durable.config.WaitForConditionConfig;
 import software.amazon.lambda.durable.model.WaitForConditionResult;
 
 /**
@@ -12,28 +12,24 @@ import software.amazon.lambda.durable.model.WaitForConditionResult;
  *
  * <p>This example simulates waiting for an order to ship, by repeatedly calling a check function.
  */
-public class WaitForConditionExample extends DurableHandler<String, String> {
-
-    private final AtomicInteger callCount = new AtomicInteger(0);
+public class WaitForConditionExample extends DurableHandler<Integer, Integer> {
 
     @Override
-    public String handleRequest(String input, DurableContext context) {
+    public Integer handleRequest(Integer input, DurableContext context) {
         // Poll the shipment status until the order is shipped.
-        // The check function simulates an order shipment status
-        // which transitions from PENDING > PROCESSING > SHIPPED
+        // The check function simulates an order shipment (0 -> 1 -> 2 -> 3 -> 4)
         return context.waitForCondition(
                 "wait-for-shipment",
-                String.class,
-                (status, stepCtx) -> {
+                Integer.class,
+                (callCount, stepCtx) -> {
                     // Simulate checking shipment status from an external service
-                    var count = callCount.incrementAndGet();
-                    if (count >= 3) {
+                    if (callCount >= 3) {
                         // Order has shipped — stop polling
-                        return WaitForConditionResult.stopPolling(input + ": SHIPPED");
+                        return WaitForConditionResult.stopPolling(callCount + 1);
                     }
                     // Order still processing — continue polling
-                    return WaitForConditionResult.continuePolling(input + ": PROCESSING");
+                    return WaitForConditionResult.continuePolling(callCount + 1);
                 },
-                input + ": PENDING"); // Order pending - initial status
+                WaitForConditionConfig.<Integer>builder().initialState(1).build()); // Order pending - initial status
     }
 }

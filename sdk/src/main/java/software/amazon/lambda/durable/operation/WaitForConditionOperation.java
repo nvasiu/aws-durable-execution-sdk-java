@@ -18,7 +18,7 @@ import software.amazon.lambda.durable.config.WaitForConditionConfig;
 import software.amazon.lambda.durable.context.DurableContextImpl;
 import software.amazon.lambda.durable.exception.DurableOperationException;
 import software.amazon.lambda.durable.exception.UnrecoverableDurableExecutionException;
-import software.amazon.lambda.durable.exception.WaitForConditionException;
+import software.amazon.lambda.durable.exception.WaitForConditionFailedException;
 import software.amazon.lambda.durable.execution.SuspendExecutionException;
 import software.amazon.lambda.durable.execution.ThreadType;
 import software.amazon.lambda.durable.model.OperationIdentifier;
@@ -39,7 +39,6 @@ public class WaitForConditionOperation<T> extends SerializableDurableOperation<T
 
     private final BiFunction<T, StepContext, WaitForConditionResult<T>> checkFunc;
     private final WaitForConditionConfig<T> config;
-    private final T initialState;
     private final ExecutorService userExecutor;
 
     public WaitForConditionOperation(
@@ -47,7 +46,6 @@ public class WaitForConditionOperation<T> extends SerializableDurableOperation<T
             String name,
             BiFunction<T, StepContext, WaitForConditionResult<T>> checkFunc,
             TypeToken<T> resultTypeToken,
-            T initialState,
             WaitForConditionConfig<T> config,
             DurableContextImpl durableContext) {
         super(
@@ -58,13 +56,12 @@ public class WaitForConditionOperation<T> extends SerializableDurableOperation<T
 
         this.checkFunc = checkFunc;
         this.config = config;
-        this.initialState = initialState;
         this.userExecutor = durableContext.getDurableConfig().getExecutorService();
     }
 
     @Override
     protected void start() {
-        executeCheckLogic(initialState, 0);
+        executeCheckLogic(config.initialState(), 0);
     }
 
     @Override
@@ -95,8 +92,8 @@ public class WaitForConditionOperation<T> extends SerializableDurableOperation<T
             if (original != null) {
                 ExceptionHelper.sneakyThrow(original);
             }
-            // Fallback: wrap in WaitForConditionException
-            throw new WaitForConditionException(op);
+            // Fallback: wrap in WaitForConditionFailedException
+            throw new WaitForConditionFailedException(op);
         }
     }
 
@@ -108,7 +105,7 @@ public class WaitForConditionOperation<T> extends SerializableDurableOperation<T
         if (checkpointData != null) {
             currentState = deserializeResult(checkpointData);
         } else {
-            currentState = initialState;
+            currentState = config.initialState();
         }
         executeCheckLogic(currentState, attempt);
     }
