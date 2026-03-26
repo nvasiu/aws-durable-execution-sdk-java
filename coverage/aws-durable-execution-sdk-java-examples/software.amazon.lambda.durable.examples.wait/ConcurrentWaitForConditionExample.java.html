@@ -12,45 +12,47 @@ import software.amazon.lambda.durable.model.WaitForConditionResult;
 /**
  * Example demonstrating concurrent waitForCondition operations using map.
  *
- * &lt;p&gt;Runs 100 waitForCondition operations concurrently (maxConcurrency 50). Each operation:
+ * &lt;p&gt;Runs many (totalOperations) waitForCondition operations concurrently (maxConcurrency). Each operation:
  *
  * &lt;ol&gt;
  *   &lt;li&gt;Uses attempt count as state (replay-safe).
  *   &lt;li&gt;Fails and retries until the attempt count reaches the given threshold, and then succeeds
  * &lt;/ol&gt;
  */
-<span class="fc" id="L22">public class ConcurrentWaitForConditionExample extends DurableHandler&lt;Integer, String&gt; {</span>
+<span class="fc" id="L22">public class ConcurrentWaitForConditionExample extends DurableHandler&lt;ConcurrentWaitForConditionExample.Input, String&gt; {</span>
+
+<span class="fc" id="L24">    public record Input(int threshold, int totalOperations, int maxConcurrency) {}</span>
 
     @Override
-    public String handleRequest(Integer threshold, DurableContext context) {
-<span class="fc" id="L26">        var items = IntStream.range(0, 100).boxed().toList();</span>
+    public String handleRequest(Input input, DurableContext context) {
+<span class="fc" id="L28">        var items = IntStream.range(0, input.totalOperations()).boxed().toList();</span>
 
-<span class="fc" id="L28">        var config = MapConfig.builder().maxConcurrency(50).build();</span>
+<span class="fc" id="L30">        var config = MapConfig.builder().maxConcurrency(input.maxConcurrency()).build();</span>
 
-<span class="fc" id="L30">        var result = context.map(</span>
+<span class="fc" id="L32">        var result = context.map(</span>
                 &quot;concurrent-wait-for-conditions&quot;,
                 items,
                 String.class,
                 (item, index, ctx) -&gt; {
-<span class="fc" id="L35">                    var conditionConfig = WaitForConditionConfig.&lt;Integer&gt;builder()</span>
-<span class="fc" id="L36">                            .initialState(1)</span>
-<span class="fc" id="L37">                            .build();</span>
+<span class="fc" id="L37">                    var conditionConfig = WaitForConditionConfig.&lt;Integer&gt;builder()</span>
+<span class="fc" id="L38">                            .initialState(1)</span>
+<span class="fc" id="L39">                            .build();</span>
                     // Poll until the counter reaches the input threshold
-<span class="fc" id="L39">                    var count = ctx.waitForCondition(</span>
+<span class="fc" id="L41">                    var count = ctx.waitForCondition(</span>
                             &quot;condition-&quot; + index,
                             Integer.class,
                             (callCount, stepCtx) -&gt; {
-<span class="fc bfc" id="L43" title="All 2 branches covered.">                                if (callCount &gt;= threshold) {</span>
-<span class="fc" id="L44">                                    return WaitForConditionResult.stopPolling(callCount);</span>
+<span class="fc bfc" id="L45" title="All 2 branches covered.">                                if (callCount &gt;= input.threshold()) {</span>
+<span class="fc" id="L46">                                    return WaitForConditionResult.stopPolling(callCount);</span>
                                 }
-<span class="fc" id="L46">                                return WaitForConditionResult.continuePolling(callCount + 1);</span>
+<span class="fc" id="L48">                                return WaitForConditionResult.continuePolling(callCount + 1);</span>
                             },
                             conditionConfig);
-<span class="fc" id="L49">                    return String.valueOf(count);</span>
+<span class="fc" id="L51">                    return String.valueOf(count);</span>
                 },
                 config);
 
-<span class="fc" id="L53">        return String.join(&quot; | &quot;, result.results());</span>
+<span class="fc" id="L55">        return String.join(&quot; | &quot;, result.results());</span>
     }
 }
 </pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>
