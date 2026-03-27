@@ -9,6 +9,7 @@ import software.amazon.lambda.durable.config.StepConfig;
 import software.amazon.lambda.durable.config.WaitForCallbackConfig;
 import software.amazon.lambda.durable.examples.types.ApprovalRequest;
 import software.amazon.lambda.durable.exception.SerDesException;
+import software.amazon.lambda.durable.execution.SuspendExecutionException;
 import software.amazon.lambda.durable.serde.JacksonSerDes;
 
 public class WaitForCallbackFailedExample extends DurableHandler<ApprovalRequest, String> {
@@ -31,6 +32,9 @@ public class WaitForCallbackFailedExample extends DurableHandler<ApprovalRequest
                                     .serDes(new FailedSerDes())
                                     .build())
                             .build());
+        } catch (SuspendExecutionException e) {
+            // not to swallow the SuspendExecutionException
+            throw e;
         } catch (Exception ex) {
             return ex.getClass().getSimpleName() + ":" + ex.getMessage();
         }

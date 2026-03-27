@@ -22,6 +22,7 @@ import software.amazon.lambda.durable.execution.ThreadContext;
 import software.amazon.lambda.durable.execution.ThreadType;
 import software.amazon.lambda.durable.model.OperationIdentifier;
 import software.amazon.lambda.durable.model.OperationSubType;
+import software.amazon.lambda.durable.util.ExceptionHelper;
 
 /**
  * Base class for all durable operations (STEP, WAIT, etc.).
@@ -187,7 +188,7 @@ public abstract class BaseDurableOperation {
         // is between `isOperationCompleted` and `thenRun`.
         // If this operation is a branch/iteration of a ConcurrencyOperation (map or parallel), the branches/iterations
         // must be completed sequentially to avoid race conditions.
-        synchronized (parentOperation == null ? completionFuture : parentOperation) {
+        synchronized (parentOperation == null ? completionFuture : parentOperation.completionFuture) {
             if (!isOperationCompleted()) {
                 // Operation not done yet
                 logger.trace(
@@ -208,7 +209,11 @@ public abstract class BaseDurableOperation {
         }
 
         // Block until operation completes. No-op if the future is already completed.
-        completionFuture.join();
+        try {
+            completionFuture.join();
+        } catch (Throwable throwable) {
+            ExceptionHelper.sneakyThrow(ExceptionHelper.unwrapCompletableFuture(throwable));
+        }
 
         // Get result based on status
         var op = getOperation();
@@ -290,7 +295,7 @@ public abstract class BaseDurableOperation {
     private void markCompletionFutureCompleted() {
         // It's important that we synchronize access to the future, otherwise the processing could happen
         // on someone else's thread and cause a race condition.
-        synchronized (parentOperation == null ? completionFuture : parentOperation) {
+        synchronized (parentOperation == null ? completionFuture : parentOperation.completionFuture) {
             // Completing the future here will also run any other completion stages that have been attached
             // to the future. In our case, other contexts may have attached a function to reactivate themselves,
             // so they will definitely have a chance to reactivate before we finish completing and deactivating
