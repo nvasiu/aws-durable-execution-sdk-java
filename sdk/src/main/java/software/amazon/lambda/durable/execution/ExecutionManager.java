@@ -11,7 +11,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
@@ -54,6 +56,7 @@ public class ExecutionManager implements AutoCloseable {
     private final Operation executionOp;
     private final String durableExecutionArn;
     private final AtomicReference<ExecutionMode> executionMode;
+    private final DurableConfig durableConfig;
 
     // ===== Thread Coordination =====
     private final Map<String, BaseDurableOperation> registeredOperations = Collections.synchronizedMap(new HashMap<>());
@@ -65,6 +68,7 @@ public class ExecutionManager implements AutoCloseable {
     private final CheckpointManager checkpointManager;
 
     public ExecutionManager(DurableExecutionInput input, DurableConfig config) {
+        durableConfig = config;
         this.durableExecutionArn = input.durableExecutionArn();
 
         // Create checkpoint batcher for internal coordination
@@ -276,7 +280,39 @@ public class ExecutionManager implements AutoCloseable {
     /** Shutdown the checkpoint batcher. */
     @Override
     public void close() {
+        validateRunningThreads();
+
         checkpointManager.shutdown();
+    }
+
+    private void validateRunningThreads() {
+        // This will detect stuck user thread and thread leaks in the thread pool
+        for (BaseDurableOperation op : registeredOperations.values()) {
+            var userHandlerFuture = op.getRunningUserHandler();
+            if (userHandlerFuture != null && !userHandlerFuture.isDone()) {
+                // Some user threads can still be running because
+                // the operations that run them have never been waiting for and the execution has completed.
+                logger.info("Waiting for operation to complete before shutting down: {}", op.getOperationId());
+                try {
+                    userHandlerFuture.get();
+                } catch (InterruptedException | CancellationException e) {
+                    // if the user handler is stuck
+                    throw new IllegalStateException(
+                            "Stuck running user handler when shutting down: " + op.getOperationId());
+                } catch (Exception e) {
+                    // ok if the future completed exceptionally
+                }
+            }
+        }
+
+        // double check if the thread pool is empty
+        if (durableConfig.getExecutorService() instanceof ThreadPoolExecutor threadPoolExecutor) {
+            var threadCount = threadPoolExecutor.getActiveCount();
+            // This may or may not be a problem because getActiveCount doesn't return an accurate number
+            if (threadCount > 0) {
+                logger.warn("{} active threads in user executor pool when shutting down", threadCount);
+            }
+        }
     }
 
     /** Returns {@code true} if the given status represents a terminal (final) operation state. */
