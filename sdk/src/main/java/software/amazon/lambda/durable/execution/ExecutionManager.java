@@ -223,8 +223,22 @@ public class ExecutionManager implements AutoCloseable {
 
             if (activeThreads.isEmpty()) {
                 logger.info("No active threads remaining - suspending execution");
+                preSuspendCheck();
                 suspendExecution();
             }
+        }
+    }
+
+    private void preSuspendCheck() {
+        var hasAnyPendingOperation = operationStorage.values().stream().anyMatch(o -> switch (o.type()) {
+            case STEP -> o.status() == OperationStatus.PENDING;
+            case WAIT, CALLBACK -> o.status() == OperationStatus.STARTED;
+            case CHAINED_INVOKE -> o.status() == OperationStatus.PENDING || o.status() == OperationStatus.STARTED;
+            default -> false;
+        });
+
+        if (!hasAnyPendingOperation) {
+            logger.warn("Invalid suspension. No operation is pending");
         }
     }
 
