@@ -9,25 +9,35 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import software.amazon.lambda.durable.config.CompletionConfig;
 import software.amazon.lambda.durable.config.MapConfig;
+import software.amazon.lambda.durable.config.NestingType;
 import software.amazon.lambda.durable.config.WaitForConditionConfig;
 import software.amazon.lambda.durable.model.ConcurrencyCompletionStatus;
 import software.amazon.lambda.durable.model.ExecutionStatus;
 import software.amazon.lambda.durable.model.MapResult;
 import software.amazon.lambda.durable.model.WaitForConditionResult;
 import software.amazon.lambda.durable.retry.WaitStrategies;
+import software.amazon.lambda.durable.serde.JacksonSerDes;
 import software.amazon.lambda.durable.testing.LocalDurableTestRunner;
 
 class MapIntegrationTest {
 
-    @Test
-    void testSimpleMap() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 2", "NESTED, 8"})
+    void testSimpleMap(NestingType nestingType, int events) {
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var items = List.of("a", "b", "c");
-            var result = context.map("process-items", items, String.class, (item, index, ctx) -> {
-                return item.toUpperCase();
-            });
+            var result = context.map(
+                    "process-items",
+                    items,
+                    String.class,
+                    (item, index, ctx) -> {
+                        return item.toUpperCase();
+                    },
+                    MapConfig.builder().nestingType(nestingType).build());
 
             assertTrue(result.allSucceeded());
             assertEquals(3, result.size());
@@ -40,6 +50,7 @@ class MapIntegrationTest {
 
         var result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
+        assertEquals(events, result.getHistoryEvents().size());
         assertEquals("A,B,C", result.getResult(String.class));
     }
 
@@ -57,19 +68,55 @@ class MapIntegrationTest {
 
         var result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
+        assertEquals(10, result.getHistoryEvents().size());
+        assertEquals(
+                result.getOperation("map-with-steps-iteration-1").getId(),
+                result.getOperation("process-1").getEvents().get(0).parentId());
         assertEquals("HELLO WORLD", result.getResult(String.class));
     }
 
     @Test
-    void testMapPartialFailure_failedItemDoesNotPreventOthers() {
+    void testFlatMapWithStepsInsideBranches() {
+        var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
+            var items = List.of("hello", "world");
+            var result = context.map(
+                    "map-with-steps",
+                    items,
+                    String.class,
+                    (item, index, ctx) -> {
+                        return ctx.step("process-" + index, String.class, stepCtx -> item.toUpperCase());
+                    },
+                    MapConfig.builder().nestingType(NestingType.FLAT).build());
+
+            assertTrue(result.allSucceeded());
+            return String.join(" ", result.results());
+        });
+
+        var result = runner.runUntilComplete("test");
+        assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
+        assertEquals(6, result.getHistoryEvents().size());
+        assertEquals(
+                result.getOperation("map-with-steps").getId(),
+                result.getOperation("process-1").getEvents().get(0).parentId());
+        assertEquals("HELLO WORLD", result.getResult(String.class));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"FLAT, 2", "NESTED, 8"})
+    void testMapPartialFailure_failedItemDoesNotPreventOthers(NestingType nestingType, int events) {
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var items = List.of("a", "FAIL", "c");
-            var result = context.map("partial-fail", items, String.class, (item, index, ctx) -> {
-                if ("FAIL".equals(item)) {
-                    throw new RuntimeException("item failed");
-                }
-                return item.toUpperCase();
-            });
+            var result = context.map(
+                    "partial-fail",
+                    items,
+                    String.class,
+                    (item, index, ctx) -> {
+                        if ("FAIL".equals(item)) {
+                            throw new RuntimeException("item failed");
+                        }
+                        return item.toUpperCase();
+                    },
+                    MapConfig.builder().nestingType(nestingType).build());
 
             // other items complete despite one failure
             assertFalse(result.allSucceeded());
@@ -93,18 +140,25 @@ class MapIntegrationTest {
 
         var result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
+        assertEquals(events, result.getHistoryEvents().size());
     }
 
-    @Test
-    void testMapMultipleFailures_allCapturedAtCorrectIndices() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 2", "NESTED, 10"})
+    void testMapMultipleFailures_allCapturedAtCorrectIndices(NestingType nestingType, int events) {
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var items = List.of("ok", "bad1", "ok2", "bad2");
-            var result = context.map("multi-fail", items, String.class, (item, index, ctx) -> {
-                if (item.startsWith("bad")) {
-                    throw new IllegalArgumentException("invalid: " + item);
-                }
-                return item.toUpperCase();
-            });
+            var result = context.map(
+                    "multi-fail",
+                    items,
+                    String.class,
+                    (item, index, ctx) -> {
+                        if (item.startsWith("bad")) {
+                            throw new IllegalArgumentException("invalid: " + item);
+                        }
+                        return item.toUpperCase();
+                    },
+                    MapConfig.builder().nestingType(nestingType).build());
 
             assertFalse(result.allSucceeded());
             assertEquals(4, result.size());
@@ -131,15 +185,22 @@ class MapIntegrationTest {
 
         var result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
+        assertEquals(events, result.getHistoryEvents().size());
     }
 
-    @Test
-    void testMapAllItemsFail() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 2", "NESTED, 6"})
+    void testMapAllItemsFail(NestingType nestingType, int events) {
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var items = List.of("x", "y");
-            var result = context.map("all-fail", items, String.class, (item, index, ctx) -> {
-                throw new RuntimeException("fail-" + item);
-            });
+            var result = context.map(
+                    "all-fail",
+                    items,
+                    String.class,
+                    (item, index, ctx) -> {
+                        throw new RuntimeException("fail-" + item);
+                    },
+                    MapConfig.builder().nestingType(nestingType).build());
 
             assertFalse(result.allSucceeded());
             assertEquals(2, result.size());
@@ -158,16 +219,21 @@ class MapIntegrationTest {
 
         var result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
+        assertEquals(events, result.getHistoryEvents().size());
     }
 
-    @Test
-    void testMapWithMaxConcurrency1_sequentialExecution() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 10", "NESTED, 18"})
+    void testMapWithMaxConcurrency1_sequentialExecution(NestingType nestingType, int events) {
         var peakConcurrency = new AtomicInteger(0);
         var currentConcurrency = new AtomicInteger(0);
 
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var items = List.of("a", "b", "c", "d");
-            var config = MapConfig.builder().maxConcurrency(1).build();
+            var config = MapConfig.builder()
+                    .maxConcurrency(1)
+                    .nestingType(nestingType)
+                    .build();
             var result = context.map(
                     "sequential-map",
                     items,
@@ -195,18 +261,23 @@ class MapIntegrationTest {
         var result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
         assertEquals("A,B,C,D", result.getResult(String.class));
+        assertEquals(events, result.getHistoryEvents().size());
         // With maxConcurrency=1, at most 1 branch should run at a time
         assertTrue(peakConcurrency.get() <= 1, "Expected peak concurrency <= 1 but was " + peakConcurrency.get());
     }
 
-    @Test
-    void testMapWithMaxConcurrency2_limitedConcurrency() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 12", "NESTED, 22"})
+    void testMapWithMaxConcurrency2_limitedConcurrency(NestingType nestingType, int events) {
         var peakConcurrency = new AtomicInteger(0);
         var currentConcurrency = new AtomicInteger(0);
 
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var items = List.of("a", "b", "c", "d", "e");
-            var config = MapConfig.builder().maxConcurrency(2).build();
+            var config = MapConfig.builder()
+                    .maxConcurrency(2)
+                    .nestingType(nestingType)
+                    .build();
             var result = context.map(
                     "limited-map",
                     items,
@@ -233,17 +304,20 @@ class MapIntegrationTest {
 
         var result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
+        assertEquals(events, result.getHistoryEvents().size());
         assertEquals("A,B,C,D,E", result.getResult(String.class));
         assertTrue(peakConcurrency.get() <= 2, "Expected peak concurrency <= 2 but was " + peakConcurrency.get());
     }
 
-    @Test
-    void testMapWithToleratedFailureCount_earlyTermination() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 2", "NESTED, 8"})
+    void testMapWithToleratedFailureCount_earlyTermination(NestingType nestingType, int events) {
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var items = List.of("ok", "FAIL1", "FAIL2", "ok2", "ok3");
             var config = MapConfig.builder()
                     .maxConcurrency(1)
                     .completionConfig(CompletionConfig.toleratedFailureCount(1))
+                    .nestingType(nestingType)
                     .build();
             var result = context.map(
                     "tolerated-fail",
@@ -271,15 +345,18 @@ class MapIntegrationTest {
 
         var result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
+        assertEquals(events, result.getHistoryEvents().size());
     }
 
-    @Test
-    void testMapWithMinSuccessful_earlyTermination() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 2", "NESTED, 6"})
+    void testMapWithMinSuccessful_earlyTermination(NestingType nestingType, int events) {
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var items = List.of("a", "b", "c", "d", "e");
             var config = MapConfig.builder()
                     .maxConcurrency(1)
                     .completionConfig(CompletionConfig.minSuccessful(2))
+                    .nestingType(nestingType)
                     .build();
             var result = context.map(
                     "min-successful", items, String.class, (item, index, ctx) -> item.toUpperCase(), config);
@@ -294,18 +371,25 @@ class MapIntegrationTest {
 
         var result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
+        assertEquals(events, result.getHistoryEvents().size());
     }
 
-    @Test
-    void testMapReplayAfterInterruption_cachedResultsUsed() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 2", "NESTED, 8"})
+    void testMapReplayAfterInterruption_cachedResultsUsed(NestingType nestingType, int events) {
         var executionCounts = new AtomicInteger(0);
 
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var items = List.of("a", "b", "c");
-            var result = context.map("replay-map", items, String.class, (item, index, ctx) -> {
-                executionCounts.incrementAndGet();
-                return item.toUpperCase();
-            });
+            var result = context.map(
+                    "replay-map",
+                    items,
+                    String.class,
+                    (item, index, ctx) -> {
+                        executionCounts.incrementAndGet();
+                        return item.toUpperCase();
+                    },
+                    MapConfig.builder().nestingType(nestingType).build());
 
             assertTrue(result.allSucceeded());
             assertEquals(3, result.size());
@@ -326,23 +410,33 @@ class MapIntegrationTest {
         assertEquals(ExecutionStatus.SUCCEEDED, result2.getStatus());
         assertEquals("A,B,C", result2.getResult(String.class));
         assertEquals(firstRunCount, executionCounts.get(), "Map functions should not re-execute on replay");
+        assertEquals(events, result2.getHistoryEvents().size());
     }
 
-    @Test
-    void testNestedMap_mapInsideMapBranch() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, FLAT, 6", "NESTED, FLAT, 10", "FLAT, NESTED, 14", "NESTED, NESTED, 18"})
+    void testNestedMap_mapInsideMapBranch(NestingType outerNestingType, NestingType innerNestingType, int events) {
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var outerItems = List.of("group1", "group2");
-            var outerResult = context.map("outer-map", outerItems, String.class, (group, outerIndex, outerCtx) -> {
-                var innerItems = List.of(group + "-a", group + "-b");
-                var innerResult = outerCtx.map(
-                        "inner-map-" + outerIndex,
-                        innerItems,
-                        String.class,
-                        (item, innerIndex, innerCtx) -> item.toUpperCase());
+            var outerResult = context.map(
+                    "outer-map",
+                    outerItems,
+                    String.class,
+                    (group, outerIndex, outerCtx) -> {
+                        var innerItems = List.of(group + "-a", group + "-b");
+                        var innerResult = outerCtx.map(
+                                "inner-map-" + outerIndex,
+                                innerItems,
+                                String.class,
+                                (item, innerIndex, innerCtx) -> item.toUpperCase(),
+                                MapConfig.builder()
+                                        .nestingType(innerNestingType)
+                                        .build());
 
-                assertTrue(innerResult.allSucceeded());
-                return String.join("+", innerResult.results());
-            });
+                        assertTrue(innerResult.allSucceeded());
+                        return String.join("+", innerResult.results());
+                    },
+                    MapConfig.builder().nestingType(outerNestingType).build());
 
             assertTrue(outerResult.allSucceeded());
             assertEquals(2, outerResult.size());
@@ -359,17 +453,24 @@ class MapIntegrationTest {
         var result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
         assertEquals("GROUP1-A+GROUP1-B|GROUP2-A+GROUP2-B", result.getResult(String.class));
+        assertEquals(events, result.getHistoryEvents().size());
     }
 
-    @Test
-    void testMapWithWaitInsideBranches() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 10", "NESTED, 14"})
+    void testMapWithWaitInsideBranches(NestingType nestingType, int events) {
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var items = List.of("a", "b");
-            var result = context.map("map-with-wait", items, String.class, (item, index, ctx) -> {
-                var stepped = ctx.step("process-" + index, String.class, stepCtx -> item.toUpperCase());
-                ctx.wait("pause-" + index, Duration.ofSeconds(1));
-                return stepped + "-done";
-            });
+            var result = context.map(
+                    "map-with-wait",
+                    items,
+                    String.class,
+                    (item, index, ctx) -> {
+                        var stepped = ctx.step("process-" + index, String.class, stepCtx -> item.toUpperCase());
+                        ctx.wait("pause-" + index, Duration.ofSeconds(1));
+                        return stepped + "-done";
+                    },
+                    MapConfig.builder().nestingType(nestingType).build());
 
             assertTrue(result.allSucceeded());
             assertEquals("A-done", result.getResult(0));
@@ -380,15 +481,22 @@ class MapIntegrationTest {
         var result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
         assertEquals("A-done,B-done", result.getResult(String.class));
+        assertEquals(events, result.getHistoryEvents().size());
     }
 
-    @Test
-    void testMapAsyncWithInterleavedWork() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 8", "NESTED, 12"})
+    void testMapAsyncWithInterleavedWork(NestingType nestingType, int events) {
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var items = List.of("x", "y");
-            var future = context.mapAsync("async-map", items, String.class, (item, index, ctx) -> {
-                return ctx.step("process-" + index, String.class, stepCtx -> item.toUpperCase());
-            });
+            var future = context.mapAsync(
+                    "async-map",
+                    items,
+                    String.class,
+                    (item, index, ctx) -> {
+                        return ctx.step("process-" + index, String.class, stepCtx -> item.toUpperCase());
+                    },
+                    MapConfig.builder().nestingType(nestingType).build());
 
             // Do other work while map runs
             var other = context.step("other-work", String.class, stepCtx -> "OTHER");
@@ -403,14 +511,17 @@ class MapIntegrationTest {
         var result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
         assertEquals("OTHER:X,Y", result.getResult(String.class));
+        assertEquals(events, result.getHistoryEvents().size());
     }
 
-    @Test
-    void testMapUnlimitedConcurrencyWithToleratedFailureCount() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 2", "NESTED, 12"})
+    void testMapUnlimitedConcurrencyWithToleratedFailureCount(NestingType nestingType, int events) {
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var items = List.of("ok1", "FAIL1", "ok2", "FAIL2", "ok3");
             var config = MapConfig.builder()
                     .completionConfig(CompletionConfig.toleratedFailureCount(1))
+                    .nestingType(nestingType)
                     .build();
             var result = context.map(
                     "unlimited-tolerated",
@@ -431,6 +542,7 @@ class MapIntegrationTest {
 
         var result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
+        assertEquals(events, result.getHistoryEvents().size());
     }
 
     @Test
@@ -463,13 +575,19 @@ class MapIntegrationTest {
         assertEquals(firstRunCount, executionCount.get(), "Map functions should not re-execute on replay");
     }
 
-    @Test
-    void testMapWithSingleItem() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 4", "NESTED, 6"})
+    void testMapWithSingleItem(NestingType nestingType, int events) {
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var items = List.of("only");
-            var result = context.map("single-item", items, String.class, (item, index, ctx) -> {
-                return ctx.step("process", String.class, stepCtx -> item.toUpperCase());
-            });
+            var result = context.map(
+                    "single-item",
+                    items,
+                    String.class,
+                    (item, index, ctx) -> {
+                        return ctx.step("process", String.class, stepCtx -> item.toUpperCase());
+                    },
+                    MapConfig.builder().nestingType(nestingType).build());
 
             assertTrue(result.allSucceeded());
             assertEquals(1, result.size());
@@ -481,15 +599,22 @@ class MapIntegrationTest {
         var result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
         assertEquals("ONLY", result.getResult(String.class));
+        assertEquals(events, result.getHistoryEvents().size());
     }
 
-    @Test
-    void testStepBeforeAndAfterMap() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 6", "NESTED, 10"})
+    void testStepBeforeAndAfterMap(NestingType nestingType, int events) {
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var before = context.step("before", String.class, stepCtx -> "BEFORE");
 
             var items = List.of("a", "b");
-            var mapResult = context.map("middle-map", items, String.class, (item, index, ctx) -> item.toUpperCase());
+            var mapResult = context.map(
+                    "middle-map",
+                    items,
+                    String.class,
+                    (item, index, ctx) -> item.toUpperCase(),
+                    MapConfig.builder().nestingType(nestingType).build());
 
             var after = context.step("after", String.class, stepCtx -> "AFTER");
 
@@ -499,14 +624,25 @@ class MapIntegrationTest {
         var result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
         assertEquals("BEFORE:A,B:AFTER", result.getResult(String.class));
+        assertEquals(events, result.getHistoryEvents().size());
     }
 
-    @Test
-    void testSequentialMaps() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 4", "NESTED, 12"})
+    void testSequentialMaps(NestingType nestingType, int events) {
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
-            var result1 =
-                    context.map("map-1", List.of("a", "b"), String.class, (item, index, ctx) -> item.toUpperCase());
-            var result2 = context.map("map-2", List.of("x", "y"), String.class, (item, index, ctx) -> item + "!");
+            var result1 = context.map(
+                    "map-1",
+                    List.of("a", "b"),
+                    String.class,
+                    (item, index, ctx) -> item.toUpperCase(),
+                    MapConfig.builder().nestingType(nestingType).build());
+            var result2 = context.map(
+                    "map-2",
+                    List.of("x", "y"),
+                    String.class,
+                    (item, index, ctx) -> item + "!",
+                    MapConfig.builder().nestingType(nestingType).build());
 
             return String.join(",", result1.results()) + "|" + String.join(",", result2.results());
         });
@@ -514,6 +650,7 @@ class MapIntegrationTest {
         var result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
         assertEquals("A,B|x!,y!", result.getResult(String.class));
+        assertEquals(events, result.getHistoryEvents().size());
     }
 
     @Test
@@ -551,18 +688,24 @@ class MapIntegrationTest {
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
     }
 
-    @Test
-    void testMapWithWaitInsideBranches_replay() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 10", "NESTED, 14"})
+    void testMapWithWaitInsideBranches_replay(NestingType nestingType, int events) {
         var executionCount = new AtomicInteger(0);
 
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var items = List.of("a", "b");
-            var result = context.map("wait-replay-map", items, String.class, (item, index, ctx) -> {
-                executionCount.incrementAndGet();
-                var stepped = ctx.step("process-" + index, String.class, stepCtx -> item.toUpperCase());
-                ctx.wait("pause-" + index, Duration.ofSeconds(1));
-                return stepped + "-done";
-            });
+            var result = context.map(
+                    "wait-replay-map",
+                    items,
+                    String.class,
+                    (item, index, ctx) -> {
+                        executionCount.incrementAndGet();
+                        var stepped = ctx.step("process-" + index, String.class, stepCtx -> item.toUpperCase());
+                        ctx.wait("pause-" + index, Duration.ofSeconds(1));
+                        return stepped + "-done";
+                    },
+                    MapConfig.builder().nestingType(nestingType).build());
 
             assertTrue(result.allSucceeded());
             return String.join(",", result.results());
@@ -571,6 +714,7 @@ class MapIntegrationTest {
         var result1 = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result1.getStatus());
         assertEquals("A-done,B-done", result1.getResult(String.class));
+        assertEquals(events, result1.getHistoryEvents().size());
         var firstRunCount = executionCount.get();
 
         // Replay — should use cached results, not re-execute
@@ -578,23 +722,36 @@ class MapIntegrationTest {
         assertEquals(ExecutionStatus.SUCCEEDED, result2.getStatus());
         assertEquals("A-done,B-done", result2.getResult(String.class));
         assertEquals(firstRunCount, executionCount.get(), "Map functions should not re-execute on replay");
+        assertEquals(events, result2.getHistoryEvents().size());
     }
 
-    @Test
-    void testNestedMap_replay() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, FLAT, 6", "FLAT, NESTED, 14", "NESTED, FLAT, 10", "NESTED, NESTED, 18"})
+    void testNestedMap_replay(NestingType outerNestingType, NestingType innerNestingType, int events) {
         var executionCount = new AtomicInteger(0);
 
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var outerItems = List.of("g1", "g2");
-            var outerResult = context.map("outer", outerItems, String.class, (group, outerIdx, outerCtx) -> {
-                var innerItems = List.of(group + "-a", group + "-b");
-                var innerResult =
-                        outerCtx.map("inner-" + outerIdx, innerItems, String.class, (item, innerIdx, innerCtx) -> {
-                            executionCount.incrementAndGet();
-                            return item.toUpperCase();
-                        });
-                return String.join("+", innerResult.results());
-            });
+            var outerResult = context.map(
+                    "outer",
+                    outerItems,
+                    String.class,
+                    (group, outerIdx, outerCtx) -> {
+                        var innerItems = List.of(group + "-a", group + "-b");
+                        var innerResult = outerCtx.map(
+                                "inner-" + outerIdx,
+                                innerItems,
+                                String.class,
+                                (item, innerIdx, innerCtx) -> {
+                                    executionCount.incrementAndGet();
+                                    return item.toUpperCase();
+                                },
+                                MapConfig.builder()
+                                        .nestingType(innerNestingType)
+                                        .build());
+                        return String.join("+", innerResult.results());
+                    },
+                    MapConfig.builder().nestingType(outerNestingType).build());
 
             return String.join("|", outerResult.results());
         });
@@ -602,20 +759,24 @@ class MapIntegrationTest {
         var result1 = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result1.getStatus());
         assertEquals("G1-A+G1-B|G2-A+G2-B", result1.getResult(String.class));
+        assertEquals(events, result1.getHistoryEvents().size());
         var firstRunCount = executionCount.get();
 
         var result2 = runner.run("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result2.getStatus());
         assertEquals("G1-A+G1-B|G2-A+G2-B", result2.getResult(String.class));
         assertEquals(firstRunCount, executionCount.get(), "Nested map should not re-execute on replay");
+        assertEquals(events, result2.getHistoryEvents().size());
     }
 
-    @Test
-    void testMapWithToleratedFailurePercentage() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 2", "NESTED, 16"})
+    void testMapWithToleratedFailurePercentage(NestingType nestingType, int events) {
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var items = List.of("ok1", "FAIL1", "ok2", "FAIL2", "ok3", "FAIL3", "ok4");
             var config = MapConfig.builder()
                     .completionConfig(CompletionConfig.toleratedFailurePercentage(0.3))
+                    .nestingType(nestingType)
                     .build();
             var result = context.map(
                     "pct-fail",
@@ -635,16 +796,19 @@ class MapIntegrationTest {
 
         var result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
+        assertEquals(events, result.getHistoryEvents().size());
     }
 
-    @Test
-    void testMapWithToleratedFailurePercentage_replay() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 2", "NESTED, 16"})
+    void testMapWithToleratedFailurePercentage_replay(NestingType nestingType, int events) {
         var executionCount = new AtomicInteger(0);
 
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var items = List.of("ok1", "FAIL1", "ok2", "FAIL2", "ok3", "FAIL3", "ok4");
             var config = MapConfig.builder()
                     .completionConfig(CompletionConfig.toleratedFailurePercentage(0.3))
+                    .nestingType(nestingType)
                     .build();
             var result = context.map(
                     "pct-fail-replay",
@@ -666,23 +830,31 @@ class MapIntegrationTest {
         var result1 = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result1.getStatus());
         var firstRunCount = executionCount.get();
+        assertEquals(events, result1.getHistoryEvents().size());
 
         // Replay — with unlimited concurrency, children replay simultaneously.
         // Verify completionReason is consistent and no re-execution occurs.
         var result2 = runner.run("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result2.getStatus());
         assertEquals(firstRunCount, executionCount.get(), "Map functions should not re-execute on replay");
+        assertEquals(events, result2.getHistoryEvents().size());
     }
 
-    @Test
-    void testMapAsyncWithWaitInsideBranches() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 12", "NESTED, 16"})
+    void testMapAsyncWithWaitInsideBranches(NestingType nestingType, int events) {
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var items = List.of("a", "b");
-            var future = context.mapAsync("async-wait-map", items, String.class, (item, index, ctx) -> {
-                var stepped = ctx.step("process-" + index, String.class, stepCtx -> item.toUpperCase());
-                ctx.wait("pause-" + index, Duration.ofSeconds(1));
-                return stepped + "-done";
-            });
+            var future = context.mapAsync(
+                    "async-wait-map",
+                    items,
+                    String.class,
+                    (item, index, ctx) -> {
+                        var stepped = ctx.step("process-" + index, String.class, stepCtx -> item.toUpperCase());
+                        ctx.wait("pause-" + index, Duration.ofSeconds(1));
+                        return stepped + "-done";
+                    },
+                    MapConfig.builder().nestingType(nestingType).build());
 
             var other = context.step("other", String.class, stepCtx -> "OTHER");
             var mapResult = future.get();
@@ -694,14 +866,19 @@ class MapIntegrationTest {
         var result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
         assertEquals("OTHER:A-done,B-done", result.getResult(String.class));
+        assertEquals(events, result.getHistoryEvents().size());
     }
 
-    @Test
-    void testMapWithCustomSerDes() {
-        var customSerDes = new software.amazon.lambda.durable.serde.JacksonSerDes();
+    @ParameterizedTest
+    @CsvSource({"FLAT, 2", "NESTED, 6"})
+    void testMapWithCustomSerDes(NestingType nestingType, int events) {
+        var customSerDes = new JacksonSerDes();
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var items = List.of("a", "b");
-            var config = MapConfig.builder().serDes(customSerDes).build();
+            var config = MapConfig.builder()
+                    .serDes(customSerDes)
+                    .nestingType(nestingType)
+                    .build();
             var result = context.map(
                     "custom-serdes-map", items, String.class, (item, index, ctx) -> item.toUpperCase(), config);
 
@@ -712,16 +889,25 @@ class MapIntegrationTest {
         var result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
         assertEquals("A,B", result.getResult(String.class));
+        assertEquals(events, result.getHistoryEvents().size());
     }
 
-    @Test
-    void testMapWithGenericResultType() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 6", "NESTED, 10"})
+    void testMapWithGenericResultType(NestingType nestingType, int events) {
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var items = List.of("a,b", "c,d");
-            var result = context.map("generic-map", items, new TypeToken<List<String>>() {}, (item, index, ctx) -> {
-                return ctx.step(
-                        "split-" + index, new TypeToken<List<String>>() {}, stepCtx -> List.of(item.split(",")));
-            });
+            var result = context.map(
+                    "generic-map",
+                    items,
+                    new TypeToken<List<String>>() {},
+                    (item, index, ctx) -> {
+                        return ctx.step(
+                                "split-" + index,
+                                new TypeToken<List<String>>() {},
+                                stepCtx -> List.of(item.split(",")));
+                    },
+                    MapConfig.builder().nestingType(nestingType).build());
 
             assertTrue(result.allSucceeded());
             assertEquals(List.of("a", "b"), result.getResult(0));
@@ -731,13 +917,18 @@ class MapIntegrationTest {
 
         var result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
+        assertEquals(events, result.getHistoryEvents().size());
     }
 
-    @Test
-    void testMapWithWaitInsideBranches_maxConcurrency1() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 10", "NESTED, 14"})
+    void testMapWithWaitInsideBranches_maxConcurrency1(NestingType nestingType, int events) {
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var items = List.of("a", "b");
-            var config = MapConfig.builder().maxConcurrency(1).build();
+            var config = MapConfig.builder()
+                    .maxConcurrency(1)
+                    .nestingType(nestingType)
+                    .build();
             var result = context.map(
                     "seq-wait-map",
                     items,
@@ -764,6 +955,7 @@ class MapIntegrationTest {
             if (result.getStatus() != ExecutionStatus.PENDING) {
                 assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
                 assertEquals("A-done,B-done", result.getResult(String.class));
+                assertEquals(events, result.getHistoryEvents().size());
                 return;
             }
             runner.advanceTime();
@@ -771,8 +963,9 @@ class MapIntegrationTest {
         fail("Expected SUCCEEDED within 10 invocations");
     }
 
-    @Test
-    void testMapWithMinSuccessful_replay() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 2", "NESTED, 6"})
+    void testMapWithMinSuccessful_replay(NestingType nestingType, int events) {
         var executionCount = new AtomicInteger(0);
 
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
@@ -780,6 +973,7 @@ class MapIntegrationTest {
             var config = MapConfig.builder()
                     .maxConcurrency(1)
                     .completionConfig(CompletionConfig.minSuccessful(2))
+                    .nestingType(nestingType)
                     .build();
             var result = context.map(
                     "min-success-replay",
@@ -800,23 +994,31 @@ class MapIntegrationTest {
         var result1 = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result1.getStatus());
         var firstRunCount = executionCount.get();
+        assertEquals(events, result1.getHistoryEvents().size());
 
         // Replay — small result path: deserialize MapResult from payload, no child replay
         var result2 = runner.run("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result2.getStatus());
         assertEquals(firstRunCount, executionCount.get(), "Map functions should not re-execute on replay");
+        assertEquals(events, result2.getHistoryEvents().size());
     }
 
-    @Test
-    void testMapAsyncWithInterleavedWork_replay() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 8", "NESTED, 12"})
+    void testMapAsyncWithInterleavedWork_replay(NestingType nestingType, int events) {
         var executionCount = new AtomicInteger(0);
 
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var items = List.of("x", "y");
-            var future = context.mapAsync("async-replay-map", items, String.class, (item, index, ctx) -> {
-                executionCount.incrementAndGet();
-                return ctx.step("process-" + index, String.class, stepCtx -> item.toUpperCase());
-            });
+            var future = context.mapAsync(
+                    "async-replay-map",
+                    items,
+                    String.class,
+                    (item, index, ctx) -> {
+                        executionCount.incrementAndGet();
+                        return ctx.step("process-" + index, String.class, stepCtx -> item.toUpperCase());
+                    },
+                    MapConfig.builder().nestingType(nestingType).build());
 
             var other = context.step("other-work", String.class, stepCtx -> "OTHER");
             var mapResult = future.get();
@@ -828,6 +1030,7 @@ class MapIntegrationTest {
         var result1 = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result1.getStatus());
         assertEquals("OTHER:X,Y", result1.getResult(String.class));
+        assertEquals(events, result1.getHistoryEvents().size());
         var firstRunCount = executionCount.get();
 
         // Replay — async map + interleaved step should all use cached results
@@ -835,10 +1038,12 @@ class MapIntegrationTest {
         assertEquals(ExecutionStatus.SUCCEEDED, result2.getStatus());
         assertEquals("OTHER:X,Y", result2.getResult(String.class));
         assertEquals(firstRunCount, executionCount.get(), "Map functions should not re-execute on replay");
+        assertEquals(events, result2.getHistoryEvents().size());
     }
 
-    @Test
-    void testMapWithLargeResult_replayChildren() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 2", "NESTED, 202"})
+    void testMapWithLargeResult_replayChildren(NestingType nestingType, int events) {
         var executionCount = new AtomicInteger(0);
         // Generate items that produce results exceeding 256KB total to trigger replayChildren path
         var items = new ArrayList<String>();
@@ -847,11 +1052,16 @@ class MapIntegrationTest {
         }
 
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
-            var result = context.map("large-result-map", items, String.class, (item, index, ctx) -> {
-                executionCount.incrementAndGet();
-                // Each item returns ~3KB string to push total well over 256KB
-                return item + "-" + "x".repeat(3000);
-            });
+            var result = context.map(
+                    "large-result-map",
+                    items,
+                    String.class,
+                    (item, index, ctx) -> {
+                        executionCount.incrementAndGet();
+                        // Each item returns ~3KB string to push total well over 256KB
+                        return item + "-" + "x".repeat(3000);
+                    },
+                    MapConfig.builder().nestingType(nestingType).build());
 
             assertTrue(result.allSucceeded());
             assertEquals(100, result.size());
@@ -862,22 +1072,33 @@ class MapIntegrationTest {
 
         var result1 = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result1.getStatus());
-        assertEquals(202, result1.getHistoryEvents().size());
+        assertEquals(events, result1.getHistoryEvents().size());
         var firstRunCount = executionCount.get();
         assertTrue(firstRunCount >= 100);
 
         // Replay — large result path: replayChildren=true, children replay from cache
         var result2 = runner.run("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result2.getStatus());
-        assertEquals(202, result2.getHistoryEvents().size());
-        assertEquals(firstRunCount, executionCount.get(), "Map functions should not re-execute on replay");
+        if (nestingType == NestingType.FLAT) {
+            // in FLAT mode, children will always be replayed
+            assertEquals(firstRunCount * 2, executionCount.get(), "Map functions should re-execute on replay");
+        } else {
+            assertEquals(firstRunCount, executionCount.get(), "Map functions should not re-execute on replay");
+        }
+        assertEquals(events, result2.getHistoryEvents().size());
     }
 
-    @Test
-    void testMapWithNullResults() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 2", "NESTED, 8"})
+    void testMapWithNullResults(NestingType nestingType, int events) {
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var items = List.of("a", "b", "c");
-            var result = context.map("null-map", items, String.class, (item, index, ctx) -> null);
+            var result = context.map(
+                    "null-map",
+                    items,
+                    String.class,
+                    (item, index, ctx) -> null,
+                    MapConfig.builder().nestingType(nestingType).build());
 
             assertTrue(result.allSucceeded());
             assertEquals(3, result.size());
@@ -893,12 +1114,14 @@ class MapIntegrationTest {
 
         var result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
+        assertEquals(events, result.getHistoryEvents().size());
     }
 
     // ---- 50-item map tests with waitForCallback ----
 
-    @Test
-    void testMap50ItemsWithWaitForCallback() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 302", "NESTED, 402"})
+    void testMap50ItemsWithWaitForCallback(NestingType nestingType, int events) {
         var itemCount = 50;
         var items = new ArrayList<Integer>();
         for (int i = 0; i < itemCount; i++) {
@@ -906,9 +1129,14 @@ class MapIntegrationTest {
         }
 
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
-            var result = context.map("50-callbacks", items, String.class, (item, index, ctx) -> {
-                return ctx.waitForCallback("approval-" + index, String.class, (callbackId, stepCtx) -> {});
-            });
+            var result = context.map(
+                    "50-callbacks",
+                    items,
+                    String.class,
+                    (item, index, ctx) -> {
+                        return ctx.waitForCallback("approval-" + index, String.class, (callbackId, stepCtx) -> {});
+                    },
+                    MapConfig.builder().nestingType(nestingType).build());
 
             assertTrue(result.allSucceeded());
             assertEquals(itemCount, result.size());
@@ -930,10 +1158,12 @@ class MapIntegrationTest {
         result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
         assertEquals("50", result.getResult(String.class));
+        assertEquals(events, result.getHistoryEvents().size());
     }
 
-    @Test
-    void testMap50ItemsWithWaitForCallback_maxConcurrency5() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 302", "NESTED, 402"})
+    void testMap50ItemsWithWaitForCallback_maxConcurrency5(NestingType nestingType, int events) {
         var itemCount = 50;
         var items = new ArrayList<Integer>();
         for (int i = 0; i < itemCount; i++) {
@@ -941,7 +1171,10 @@ class MapIntegrationTest {
         }
 
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
-            var config = MapConfig.builder().maxConcurrency(5).build();
+            var config = MapConfig.builder()
+                    .maxConcurrency(5)
+                    .nestingType(nestingType)
+                    .build();
             var result = context.map(
                     "50-callbacks-limited",
                     items,
@@ -978,10 +1211,12 @@ class MapIntegrationTest {
         result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
         assertEquals("50", result.getResult(String.class));
+        assertEquals(events, result.getHistoryEvents().size());
     }
 
-    @Test
-    void testMap50ItemsWithWaitForCallback_partialFailure() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 302", "NESTED, 402"})
+    void testMap50ItemsWithWaitForCallback_partialFailure(NestingType nestingType, int events) {
         var itemCount = 50;
         var items = new ArrayList<Integer>();
         for (int i = 0; i < itemCount; i++) {
@@ -989,9 +1224,14 @@ class MapIntegrationTest {
         }
 
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
-            var result = context.map("50-callbacks-partial-fail", items, String.class, (item, index, ctx) -> {
-                return ctx.waitForCallback("approval-" + index, String.class, (callbackId, stepCtx) -> {});
-            });
+            var result = context.map(
+                    "50-callbacks-partial-fail",
+                    items,
+                    String.class,
+                    (item, index, ctx) -> {
+                        return ctx.waitForCallback("approval-" + index, String.class, (callbackId, stepCtx) -> {});
+                    },
+                    MapConfig.builder().nestingType(nestingType).build());
 
             assertEquals(itemCount, result.size());
             assertEquals(25, result.succeeded().size());
@@ -1024,10 +1264,12 @@ class MapIntegrationTest {
         result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
         assertEquals("25/25", result.getResult(String.class));
+        assertEquals(events, result.getHistoryEvents().size());
     }
 
-    @Test
-    void testMap50ItemsWithWaitForCallback_stepsBeforeAndAfterCallback() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 502", "NESTED, 602"})
+    void testMap50ItemsWithWaitForCallback_stepsBeforeAndAfterCallback(NestingType nestingType, int events) {
         var itemCount = 50;
         var items = new ArrayList<Integer>();
         for (int i = 0; i < itemCount; i++) {
@@ -1035,11 +1277,18 @@ class MapIntegrationTest {
         }
 
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
-            var result = context.map("50-callbacks-with-steps", items, String.class, (item, index, ctx) -> {
-                var before = ctx.step("prepare-" + index, String.class, stepCtx -> "prepared-" + index);
-                var approval = ctx.waitForCallback("approval-" + index, String.class, (callbackId, stepCtx) -> {});
-                return ctx.step("finalize-" + index, String.class, stepCtx -> before + ":" + approval + ":done");
-            });
+            var result = context.map(
+                    "50-callbacks-with-steps",
+                    items,
+                    String.class,
+                    (item, index, ctx) -> {
+                        var before = ctx.step("prepare-" + index, String.class, stepCtx -> "prepared-" + index);
+                        var approval =
+                                ctx.waitForCallback("approval-" + index, String.class, (callbackId, stepCtx) -> {});
+                        return ctx.step(
+                                "finalize-" + index, String.class, stepCtx -> before + ":" + approval + ":done");
+                    },
+                    MapConfig.builder().nestingType(nestingType).build());
 
             assertTrue(result.allSucceeded());
             return String.valueOf(result.succeeded().size());
@@ -1060,12 +1309,14 @@ class MapIntegrationTest {
         result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
         assertEquals("50", result.getResult(String.class));
+        assertEquals(events, result.getHistoryEvents().size());
     }
 
     // ---- 50-item map tests with waitForCondition ----
 
-    @Test
-    void testMap50ItemsWithWaitForCondition() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 200", "NESTED, 300"})
+    void testMap50ItemsWithWaitForCondition(NestingType nestingType, int events) {
         var itemCount = 50;
         var items = new ArrayList<Integer>();
         for (int i = 0; i < itemCount; i++) {
@@ -1074,25 +1325,30 @@ class MapIntegrationTest {
         var checkCounts = new AtomicInteger(0);
 
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
-            var result = context.map("50-conditions", items, Integer.class, (item, index, ctx) -> {
-                var targetChecks = (index % 3) + 1; // 1, 2, or 3 checks to complete
-                var strategy = WaitStrategies.<Integer>fixedDelay(10, Duration.ofSeconds(1));
-                var wfcConfig = WaitForConditionConfig.<Integer>builder()
-                        .waitStrategy(strategy)
-                        .build();
+            var result = context.map(
+                    "50-conditions",
+                    items,
+                    Integer.class,
+                    (item, index, ctx) -> {
+                        var targetChecks = (index % 3) + 1; // 1, 2, or 3 checks to complete
+                        var strategy = WaitStrategies.<Integer>fixedDelay(10, Duration.ofSeconds(1));
+                        var wfcConfig = WaitForConditionConfig.<Integer>builder()
+                                .waitStrategy(strategy)
+                                .build();
 
-                return ctx.waitForCondition(
-                        "poll-" + index,
-                        Integer.class,
-                        (state, stepCtx) -> {
-                            checkCounts.incrementAndGet();
-                            var next = (state == null ? 0 : state) + 1;
-                            return next >= targetChecks
-                                    ? WaitForConditionResult.stopPolling(next)
-                                    : WaitForConditionResult.continuePolling(next);
-                        },
-                        wfcConfig);
-            });
+                        return ctx.waitForCondition(
+                                "poll-" + index,
+                                Integer.class,
+                                (state, stepCtx) -> {
+                                    checkCounts.incrementAndGet();
+                                    var next = (state == null ? 0 : state) + 1;
+                                    return next >= targetChecks
+                                            ? WaitForConditionResult.stopPolling(next)
+                                            : WaitForConditionResult.continuePolling(next);
+                                },
+                                wfcConfig);
+                    },
+                    MapConfig.builder().nestingType(nestingType).build());
 
             assertTrue(result.allSucceeded());
             assertEquals(itemCount, result.size());
@@ -1111,10 +1367,12 @@ class MapIntegrationTest {
         // Sum of results: 17*1 + 17*2 + 16*3 = 17 + 34 + 48 = 99
         assertEquals("99", result.getResult(String.class));
         assertTrue(checkCounts.get() >= itemCount, "Should have at least " + itemCount + " checks");
+        assertEquals(events, result.getHistoryEvents().size());
     }
 
-    @Test
-    void testMap50ItemsWithWaitForCondition_someExceedMaxAttempts() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 152", "NESTED, 252"})
+    void testMap50ItemsWithWaitForCondition_someExceedMaxAttempts(NestingType nestingType, int events) {
         var itemCount = 50;
         var items = new ArrayList<Integer>();
         for (int i = 0; i < itemCount; i++) {
@@ -1122,26 +1380,31 @@ class MapIntegrationTest {
         }
 
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
-            var result = context.map("50-conditions-some-fail", items, Integer.class, (item, index, ctx) -> {
-                // Odd items: maxAttempts=1 but need 2 checks → will fail
-                // Even items: maxAttempts=5, need 2 checks → will succeed
-                var maxAttempts = (index % 2 == 0) ? 5 : 1;
-                var strategy = WaitStrategies.<Integer>fixedDelay(maxAttempts, Duration.ofSeconds(1));
-                var wfcConfig = WaitForConditionConfig.<Integer>builder()
-                        .waitStrategy(strategy)
-                        .build();
+            var result = context.map(
+                    "50-conditions-some-fail",
+                    items,
+                    Integer.class,
+                    (item, index, ctx) -> {
+                        // Odd items: maxAttempts=1 but need 2 checks → will fail
+                        // Even items: maxAttempts=5, need 2 checks → will succeed
+                        var maxAttempts = (index % 2 == 0) ? 5 : 1;
+                        var strategy = WaitStrategies.<Integer>fixedDelay(maxAttempts, Duration.ofSeconds(1));
+                        var wfcConfig = WaitForConditionConfig.<Integer>builder()
+                                .waitStrategy(strategy)
+                                .build();
 
-                return ctx.waitForCondition(
-                        "poll-" + index,
-                        Integer.class,
-                        (state, stepCtx) -> {
-                            var next = (state == null ? 0 : state) + 1;
-                            return next >= 2
-                                    ? WaitForConditionResult.stopPolling(next)
-                                    : WaitForConditionResult.continuePolling(next);
-                        },
-                        wfcConfig);
-            });
+                        return ctx.waitForCondition(
+                                "poll-" + index,
+                                Integer.class,
+                                (state, stepCtx) -> {
+                                    var next = (state == null ? 0 : state) + 1;
+                                    return next >= 2
+                                            ? WaitForConditionResult.stopPolling(next)
+                                            : WaitForConditionResult.continuePolling(next);
+                                },
+                                wfcConfig);
+                    },
+                    MapConfig.builder().nestingType(nestingType).build());
 
             assertEquals(itemCount, result.size());
             assertEquals(25, result.succeeded().size());
@@ -1154,10 +1417,12 @@ class MapIntegrationTest {
         var result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
         assertEquals("25/25", result.getResult(String.class));
+        assertEquals(events, result.getHistoryEvents().size());
     }
 
-    @Test
-    void testMap50ItemsWithWaitForCondition_replay() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 102", "NESTED, 202"})
+    void testMap50ItemsWithWaitForCondition_replay(NestingType nestingType, int events) {
         var itemCount = 50;
         var items = new ArrayList<Integer>();
         for (int i = 0; i < itemCount; i++) {
@@ -1166,23 +1431,28 @@ class MapIntegrationTest {
         var checkCounts = new AtomicInteger(0);
 
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
-            var result = context.map("50-conditions-replay", items, String.class, (item, index, ctx) -> {
-                var strategy = WaitStrategies.<Integer>fixedDelay(5, Duration.ofSeconds(1));
-                var wfcConfig = WaitForConditionConfig.<Integer>builder()
-                        .waitStrategy(strategy)
-                        .build();
+            var result = context.map(
+                    "50-conditions-replay",
+                    items,
+                    String.class,
+                    (item, index, ctx) -> {
+                        var strategy = WaitStrategies.<Integer>fixedDelay(5, Duration.ofSeconds(1));
+                        var wfcConfig = WaitForConditionConfig.<Integer>builder()
+                                .waitStrategy(strategy)
+                                .build();
 
-                var polled = ctx.waitForCondition(
-                        "poll-" + index,
-                        Integer.class,
-                        (state, stepCtx) -> {
-                            checkCounts.incrementAndGet();
-                            return WaitForConditionResult.stopPolling(1);
-                        },
-                        wfcConfig);
+                        var polled = ctx.waitForCondition(
+                                "poll-" + index,
+                                Integer.class,
+                                (state, stepCtx) -> {
+                                    checkCounts.incrementAndGet();
+                                    return WaitForConditionResult.stopPolling(1);
+                                },
+                                wfcConfig);
 
-                return String.valueOf(polled);
-            });
+                        return String.valueOf(polled);
+                    },
+                    MapConfig.builder().nestingType(nestingType).build());
 
             assertTrue(result.allSucceeded());
             return "done";
@@ -1192,17 +1462,20 @@ class MapIntegrationTest {
         assertEquals(ExecutionStatus.SUCCEEDED, result1.getStatus());
         var firstRunChecks = checkCounts.get();
         assertEquals(itemCount, firstRunChecks);
+        assertEquals(events, result1.getHistoryEvents().size());
 
         // Replay — check functions should not re-execute
         var result2 = runner.run("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result2.getStatus());
         assertEquals(firstRunChecks, checkCounts.get(), "Check functions should not re-execute on replay");
+        assertEquals(events, result2.getHistoryEvents().size());
     }
 
     // ---- 50-item map tests mixing waitForCallback and waitForCondition ----
 
-    @Test
-    void testMap50ItemsMixed_callbackAndCondition() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 202", "NESTED, 302"})
+    void testMap50ItemsMixed_callbackAndCondition(NestingType nestingType, int events) {
         var itemCount = 50;
         var items = new ArrayList<Integer>();
         for (int i = 0; i < itemCount; i++) {
@@ -1210,26 +1483,31 @@ class MapIntegrationTest {
         }
 
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
-            var result = context.map("50-mixed", items, String.class, (item, index, ctx) -> {
-                if (index % 2 == 0) {
-                    // Even items: waitForCallback
-                    return ctx.waitForCallback("cb-" + index, String.class, (callbackId, stepCtx) -> {});
-                } else {
-                    // Odd items: waitForCondition
-                    var strategy = WaitStrategies.<Integer>fixedDelay(5, Duration.ofSeconds(1));
-                    var wfcConfig = WaitForConditionConfig.<Integer>builder()
-                            .waitStrategy(strategy)
-                            .build();
+            var result = context.map(
+                    "50-mixed",
+                    items,
+                    String.class,
+                    (item, index, ctx) -> {
+                        if (index % 2 == 0) {
+                            // Even items: waitForCallback
+                            return ctx.waitForCallback("cb-" + index, String.class, (callbackId, stepCtx) -> {});
+                        } else {
+                            // Odd items: waitForCondition
+                            var strategy = WaitStrategies.<Integer>fixedDelay(5, Duration.ofSeconds(1));
+                            var wfcConfig = WaitForConditionConfig.<Integer>builder()
+                                    .waitStrategy(strategy)
+                                    .build();
 
-                    var polled = ctx.waitForCondition(
-                            "poll-" + index,
-                            Integer.class,
-                            (state, stepCtx) -> WaitForConditionResult.stopPolling(index),
-                            wfcConfig);
+                            var polled = ctx.waitForCondition(
+                                    "poll-" + index,
+                                    Integer.class,
+                                    (state, stepCtx) -> WaitForConditionResult.stopPolling(index),
+                                    wfcConfig);
 
-                    return "polled-" + polled;
-                }
-            });
+                            return "polled-" + polled;
+                        }
+                    },
+                    MapConfig.builder().nestingType(nestingType).build());
 
             assertEquals(itemCount, result.size());
             return String.valueOf(result.succeeded().size());
@@ -1249,28 +1527,45 @@ class MapIntegrationTest {
         result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
         assertEquals("50", result.getResult(String.class));
+        assertEquals(events, result.getHistoryEvents().size());
     }
 
-    @Test
-    void testMultipleMapAsyncInParallel() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 24", "NESTED, 42"})
+    void testMultipleMapAsyncInParallel(NestingType nestingType, int events) {
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var numbers = List.of(1, 2, 3);
             var letters = List.of("a", "b");
             var words = List.of("hello", "world", "foo", "bar");
 
-            var numbersFuture = context.mapAsync("map-numbers", numbers, String.class, (item, index, ctx) -> {
-                return ctx.step("double-" + index, String.class, stepCtx -> String.valueOf(item * 2));
-            });
+            var numbersFuture = context.mapAsync(
+                    "map-numbers",
+                    numbers,
+                    String.class,
+                    (item, index, ctx) -> {
+                        return ctx.step("double-" + index, String.class, stepCtx -> String.valueOf(item * 2));
+                    },
+                    MapConfig.builder().nestingType(nestingType).build());
 
-            var lettersFuture = context.mapAsync("map-letters", letters, String.class, (item, index, ctx) -> {
-                return ctx.step("upper-" + index, String.class, stepCtx -> item.toUpperCase());
-            });
+            var lettersFuture = context.mapAsync(
+                    "map-letters",
+                    letters,
+                    String.class,
+                    (item, index, ctx) -> {
+                        return ctx.step("upper-" + index, String.class, stepCtx -> item.toUpperCase());
+                    },
+                    MapConfig.builder().nestingType(nestingType).build());
 
-            var wordsFuture = context.mapAsync("map-words", words, String.class, (item, index, ctx) -> {
-                return ctx.step("reverse-" + index, String.class, stepCtx -> new StringBuilder(item)
-                        .reverse()
-                        .toString());
-            });
+            var wordsFuture = context.mapAsync(
+                    "map-words",
+                    words,
+                    String.class,
+                    (item, index, ctx) -> {
+                        return ctx.step("reverse-" + index, String.class, stepCtx -> new StringBuilder(item)
+                                .reverse()
+                                .toString());
+                    },
+                    MapConfig.builder().nestingType(nestingType).build());
 
             var numbersResult = numbersFuture.get();
             var lettersResult = lettersFuture.get();
@@ -1288,13 +1583,20 @@ class MapIntegrationTest {
         var result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
         assertEquals("2,4,6|A,B|olleh,dlrow,oof,rab", result.getResult(String.class));
+        assertEquals(events, result.getHistoryEvents().size());
     }
 
-    @Test
-    void testMapWithEmptyItems() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 0", "NESTED, 0"})
+    void testMapWithEmptyItems(NestingType nestingType, int events) {
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             List<String> items = List.of();
-            var result = context.map("empty-map", items, String.class, (item, index, ctx) -> item);
+            var result = context.map(
+                    "empty-map",
+                    items,
+                    String.class,
+                    (item, index, ctx) -> item,
+                    MapConfig.builder().nestingType(nestingType).build());
 
             assertTrue(result.allSucceeded());
             assertEquals(0, result.size());
@@ -1304,13 +1606,20 @@ class MapIntegrationTest {
 
         var result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
+        assertEquals(events, result.getHistoryEvents().size());
     }
 
-    @Test
-    void testAnyOfMapWithEmptyItems() {
+    @ParameterizedTest
+    @CsvSource({"FLAT, 0", "NESTED, 0"})
+    void testAnyOfMapWithEmptyItems(NestingType nestingType, int events) {
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             List<String> items = List.of();
-            var result = context.mapAsync("empty-map", items, String.class, (item, index, ctx) -> item);
+            var result = context.mapAsync(
+                    "empty-map",
+                    items,
+                    String.class,
+                    (item, index, ctx) -> item,
+                    MapConfig.builder().nestingType(nestingType).build());
 
             DurableFuture.anyOf(result);
 
@@ -1319,5 +1628,6 @@ class MapIntegrationTest {
 
         var result = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
+        assertEquals(events, result.getHistoryEvents().size());
     }
 }

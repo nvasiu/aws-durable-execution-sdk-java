@@ -6,7 +6,6 @@ import java.util.function.Function;
 import software.amazon.awssdk.services.lambda.model.ContextOptions;
 import software.amazon.awssdk.services.lambda.model.Operation;
 import software.amazon.awssdk.services.lambda.model.OperationAction;
-import software.amazon.awssdk.services.lambda.model.OperationStatus;
 import software.amazon.awssdk.services.lambda.model.OperationUpdate;
 import software.amazon.lambda.durable.DurableContext;
 import software.amazon.lambda.durable.DurableFuture;
@@ -61,20 +60,17 @@ public class ParallelOperation extends ConcurrencyOperation<ParallelResult> impl
                 durableContext,
                 config.maxConcurrency(),
                 config.completionConfig().minSuccessful(),
-                config.completionConfig().toleratedFailureCount());
+                config.completionConfig().toleratedFailureCount(),
+                config.nestingType());
     }
 
     @Override
     protected void handleCompletion(ConcurrencyCompletionStatus concurrencyCompletionStatus) {
         var items = getBranches();
-        int succeededCount = Math.toIntExact(items.stream()
-                .filter(item ->
-                        item.getOperation() != null && item.getOperation().status() == OperationStatus.SUCCEEDED)
-                .count());
-        int failedCount = Math.toIntExact(items.stream()
-                .filter(item ->
-                        item.getOperation() != null && item.getOperation().status() != OperationStatus.SUCCEEDED)
-                .count());
+        int succeededCount = Math.toIntExact(
+                items.stream().filter(this::isOperationCompletedSuccessfully).count());
+        int failedCount = Math.toIntExact(
+                items.stream().filter(this::isOperationCompletedExceptionally).count());
         this.cachedResult = new ParallelResult(items.size(), succeededCount, failedCount, concurrencyCompletionStatus);
         if (skipCheckpoint) {
             // Do not send checkpoint during replay
@@ -85,6 +81,30 @@ public class ParallelOperation extends ConcurrencyOperation<ParallelResult> impl
                 .action(OperationAction.SUCCEED)
                 .subType(getSubType().getValue())
                 .contextOptions(ContextOptions.builder().replayChildren(true).build()));
+    }
+
+    private boolean isOperationCompletedSuccessfully(ChildContextOperation<?> childContextOperation) {
+        if (!childContextOperation.isOperationCompleted()) {
+            return false;
+        }
+        try {
+            childContextOperation.get();
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private boolean isOperationCompletedExceptionally(ChildContextOperation<?> childContextOperation) {
+        if (!childContextOperation.isOperationCompleted()) {
+            return false;
+        }
+        try {
+            childContextOperation.get();
+            return false;
+        } catch (Throwable t) {
+            return true;
+        }
     }
 
     @Override

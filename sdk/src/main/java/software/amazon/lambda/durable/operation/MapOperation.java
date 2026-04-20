@@ -61,7 +61,8 @@ public class MapOperation<I, O> extends ConcurrencyOperation<MapResult<O>> {
                 durableContext,
                 config.maxConcurrency(),
                 config.completionConfig().minSuccessful(),
-                getToleratedFailureCount(config.completionConfig(), items.size()));
+                getToleratedFailureCount(config.completionConfig(), items.size()),
+                config.nestingType());
         if (config.completionConfig().minSuccessful() != null
                 && config.completionConfig().minSuccessful() > items.size()) {
             throw new IllegalArgumentException("minSuccessful cannot be greater than total items: "
@@ -184,6 +185,7 @@ public class MapOperation<I, O> extends ConcurrencyOperation<MapResult<O>> {
         }
 
         this.cachedResult = new MapResult<>(resultItems, concurrencyCompletionStatus);
+        // avoid checkpointing because the operation has succeeded and the children are replayed for large result
         if (replayForLargeResult.get()) {
             markAlreadyCompleted();
             return;
