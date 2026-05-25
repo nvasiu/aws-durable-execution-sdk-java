@@ -5,7 +5,6 @@ package software.amazon.lambda.durable.execution;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -13,6 +12,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
@@ -59,7 +59,7 @@ public class ExecutionManager implements AutoCloseable {
     private final DurableConfig durableConfig;
 
     // ===== Thread Coordination =====
-<span class="fc" id="L62">    private final Map&lt;String, BaseDurableOperation&gt; registeredOperations = Collections.synchronizedMap(new HashMap&lt;&gt;());</span>
+<span class="fc" id="L62">    private final Map&lt;String, BaseDurableOperation&gt; registeredOperations = new ConcurrentHashMap&lt;&gt;();</span>
 <span class="fc" id="L63">    private final Set&lt;String&gt; activeThreads = Collections.synchronizedSet(new HashSet&lt;&gt;());</span>
 <span class="fc" id="L64">    private static final ThreadLocal&lt;ThreadContext&gt; currentThreadContext = new ThreadLocal&lt;&gt;();</span>
 <span class="fc" id="L65">    private final CompletableFuture&lt;Void&gt; executionExceptionFuture = new CompletableFuture&lt;&gt;();</span>
@@ -237,12 +237,12 @@ public class ExecutionManager implements AutoCloseable {
 <span class="fc bfc" id="L237" title="All 4 branches covered.">        var hasAnyPendingOperation = operationStorage.values().stream().anyMatch(o -&gt; switch (o.type()) {</span>
 <span class="fc bfc" id="L238" title="All 2 branches covered.">            case STEP -&gt; o.status() == OperationStatus.PENDING;</span>
 <span class="fc bfc" id="L239" title="All 2 branches covered.">            case WAIT, CALLBACK -&gt; o.status() == OperationStatus.STARTED;</span>
-<span class="pc bpc" id="L240" title="2 of 4 branches missed.">            case CHAINED_INVOKE -&gt; o.status() == OperationStatus.PENDING || o.status() == OperationStatus.STARTED;</span>
+<span class="pc bpc" id="L240" title="1 of 4 branches missed.">            case CHAINED_INVOKE -&gt; o.status() == OperationStatus.PENDING || o.status() == OperationStatus.STARTED;</span>
 <span class="fc" id="L241">            default -&gt; false;</span>
         });
 
-<span class="fc bfc" id="L244" title="All 2 branches covered.">        if (!hasAnyPendingOperation) {</span>
-<span class="fc" id="L245">            logger.warn(&quot;Invalid suspension. No operation is pending&quot;);</span>
+<span class="pc bpc" id="L244" title="1 of 2 branches missed.">        if (!hasAnyPendingOperation) {</span>
+<span class="nc" id="L245">            logger.warn(&quot;Invalid suspension. No operation is pending&quot;);</span>
         }
 <span class="fc" id="L247">    }</span>
 
@@ -351,7 +351,7 @@ public class ExecutionManager implements AutoCloseable {
 <span class="fc" id="L351">        return executionExceptionFuture.isCompletedExceptionally();</span>
     }
 
-    private void stopAllOperations(Exception cause) {
+    private void stopAllOperations(Throwable cause) {
 <span class="fc" id="L355">        registeredOperations.values().forEach(op -&gt; op.getCompletionFuture().completeExceptionally(cause));</span>
 <span class="fc" id="L356">    }</span>
 
