@@ -17,6 +17,7 @@ software.amazon.lambda.durable.execution
 software.amazon.lambda.durable.logging
 software.amazon.lambda.durable.model
 software.amazon.lambda.durable.operation
+software.amazon.lambda.durable.plugin
 software.amazon.lambda.durable.retry
 software.amazon.lambda.durable.serde
 software.amazon.lambda.durable.testing
