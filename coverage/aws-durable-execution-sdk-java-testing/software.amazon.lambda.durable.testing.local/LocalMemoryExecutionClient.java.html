@@ -190,53 +190,54 @@ import software.amazon.lambda.durable.testing.TestResult;
 <span class="fc" id="L190">                    .id(op.id())</span>
 <span class="fc" id="L191">                    .name(op.name())</span>
 <span class="fc" id="L192">                    .type(op.type())</span>
-<span class="fc" id="L193">                    .action(action)</span>
-<span class="fc" id="L194">                    .parentId(op.parentId())</span>
-<span class="fc" id="L195">                    .payload(result.result())</span>
-<span class="fc" id="L196">                    .error(result.error())</span>
-<span class="fc" id="L197">                    .build();</span>
-<span class="fc" id="L198">            applyUpdate(update);</span>
-<span class="fc bfc" id="L199" title="All 2 branches covered.">        } else if (result.operationStatus() == OperationStatus.TIMED_OUT</span>
-<span class="fc bfc" id="L200" title="All 2 branches covered.">                || result.operationStatus() == OperationStatus.STOPPED</span>
-<span class="pc bpc" id="L201" title="1 of 2 branches missed.">                || result.operationStatus() == OperationStatus.READY) {</span>
-<span class="fc" id="L202">            var newOp = OperationProcessor.applyResult(op, result);</span>
-<span class="fc" id="L203">            updateOperation(null, newOp);</span>
-<span class="fc" id="L204">        } else {</span>
-<span class="nc" id="L205">            throw new IllegalStateException(&quot;Unsupported OperationStatus in result: &quot; + result.operationStatus());</span>
+<span class="fc" id="L193">                    .subType(op.subType())</span>
+<span class="fc" id="L194">                    .action(action)</span>
+<span class="fc" id="L195">                    .parentId(op.parentId())</span>
+<span class="fc" id="L196">                    .payload(result.result())</span>
+<span class="fc" id="L197">                    .error(result.error())</span>
+<span class="fc" id="L198">                    .build();</span>
+<span class="fc" id="L199">            applyUpdate(update);</span>
+<span class="fc bfc" id="L200" title="All 2 branches covered.">        } else if (result.operationStatus() == OperationStatus.TIMED_OUT</span>
+<span class="fc bfc" id="L201" title="All 2 branches covered.">                || result.operationStatus() == OperationStatus.STOPPED</span>
+<span class="pc bpc" id="L202" title="1 of 2 branches missed.">                || result.operationStatus() == OperationStatus.READY) {</span>
+<span class="fc" id="L203">            var newOp = OperationProcessor.applyResult(op, result);</span>
+<span class="fc" id="L204">            updateOperation(null, newOp);</span>
+<span class="fc" id="L205">        } else {</span>
+<span class="nc" id="L206">            throw new IllegalStateException(&quot;Unsupported OperationStatus in result: &quot; + result.operationStatus());</span>
         }
-<span class="fc" id="L207">    }</span>
+<span class="fc" id="L208">    }</span>
 
     private static OperationAction deriveAction(OperationStatus status) {
-<span class="pc bpc" id="L210" title="4 of 7 branches missed.">        return switch (status) {</span>
-<span class="nc" id="L211">            case STARTED -&gt; OperationAction.START;</span>
-<span class="fc" id="L212">            case SUCCEEDED -&gt; OperationAction.SUCCEED;</span>
-<span class="fc" id="L213">            case FAILED -&gt; OperationAction.FAIL;</span>
-<span class="nc" id="L214">            case PENDING -&gt; OperationAction.RETRY;</span>
-<span class="nc" id="L215">            case CANCELLED -&gt; OperationAction.CANCEL;</span>
-<span class="fc" id="L216">            case READY, TIMED_OUT, STOPPED -&gt; null; // no action for these operation statuses</span>
-<span class="nc" id="L217">            case UNKNOWN_TO_SDK_VERSION -&gt; OperationAction.UNKNOWN_TO_SDK_VERSION; // Todo: Check this</span>
+<span class="pc bpc" id="L211" title="4 of 7 branches missed.">        return switch (status) {</span>
+<span class="nc" id="L212">            case STARTED -&gt; OperationAction.START;</span>
+<span class="fc" id="L213">            case SUCCEEDED -&gt; OperationAction.SUCCEED;</span>
+<span class="fc" id="L214">            case FAILED -&gt; OperationAction.FAIL;</span>
+<span class="nc" id="L215">            case PENDING -&gt; OperationAction.RETRY;</span>
+<span class="nc" id="L216">            case CANCELLED -&gt; OperationAction.CANCEL;</span>
+<span class="fc" id="L217">            case READY, TIMED_OUT, STOPPED -&gt; null; // no action for these operation statuses</span>
+<span class="nc" id="L218">            case UNKNOWN_TO_SDK_VERSION -&gt; OperationAction.UNKNOWN_TO_SDK_VERSION; // Todo: Check this</span>
         };
     }
 
     private Operation findOperationByCallbackId(String callbackId) {
-<span class="fc" id="L222">        return existingOperations.values().stream()</span>
-<span class="fc bfc" id="L223" title="All 2 branches covered.">                .filter(op -&gt; op.callbackDetails() != null</span>
-<span class="fc bfc" id="L224" title="All 2 branches covered.">                        &amp;&amp; callbackId.equals(op.callbackDetails().callbackId()))</span>
-<span class="fc" id="L225">                .findFirst()</span>
-<span class="fc" id="L226">                .orElse(null);</span>
+<span class="fc" id="L223">        return existingOperations.values().stream()</span>
+<span class="fc bfc" id="L224" title="All 2 branches covered.">                .filter(op -&gt; op.callbackDetails() != null</span>
+<span class="fc bfc" id="L225" title="All 2 branches covered.">                        &amp;&amp; callbackId.equals(op.callbackDetails().callbackId()))</span>
+<span class="fc" id="L226">                .findFirst()</span>
+<span class="fc" id="L227">                .orElse(null);</span>
     }
 
     private void updateOperation(OperationUpdate update, Operation op) {
         // update can be null when an operation is updated without an OperationUpdate
-<span class="fc bfc" id="L231" title="All 2 branches covered.">        if (update == null) {</span>
-<span class="fc" id="L232">            eventProcessor.processUpdate(op);</span>
+<span class="fc bfc" id="L232" title="All 2 branches covered.">        if (update == null) {</span>
+<span class="fc" id="L233">            eventProcessor.processUpdate(op);</span>
         } else {
-<span class="fc" id="L234">            eventProcessor.processUpdate(update, op);</span>
+<span class="fc" id="L235">            eventProcessor.processUpdate(update, op);</span>
         }
-<span class="fc" id="L236">        existingOperations.put(op.id(), op);</span>
-<span class="fc" id="L237">        synchronized (updatedOperations) {</span>
-<span class="fc" id="L238">            updatedOperations.put(op.id(), op);</span>
-<span class="fc" id="L239">        }</span>
-<span class="fc" id="L240">    }</span>
+<span class="fc" id="L237">        existingOperations.put(op.id(), op);</span>
+<span class="fc" id="L238">        synchronized (updatedOperations) {</span>
+<span class="fc" id="L239">            updatedOperations.put(op.id(), op);</span>
+<span class="fc" id="L240">        }</span>
+<span class="fc" id="L241">    }</span>
 }
 </pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

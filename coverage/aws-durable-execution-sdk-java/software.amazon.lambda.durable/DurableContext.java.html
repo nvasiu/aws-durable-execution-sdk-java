@@ -642,12 +642,12 @@ public interface DurableContext extends BaseContext {
      */
     default &lt;T&gt; T waitForCondition(
             String name, Class&lt;T&gt; resultType, BiFunction&lt;T, StepContext, WaitForConditionResult&lt;T&gt;&gt; checkFunc) {
-<span class="nc" id="L645">        return waitForConditionAsync(</span>
+<span class="fc" id="L645">        return waitForConditionAsync(</span>
                         name,
-<span class="nc" id="L647">                        TypeToken.get(resultType),</span>
+<span class="fc" id="L647">                        TypeToken.get(resultType),</span>
                         checkFunc,
-<span class="nc" id="L649">                        WaitForConditionConfig.&lt;T&gt;builder().build())</span>
-<span class="nc" id="L650">                .get();</span>
+<span class="fc" id="L649">                        WaitForConditionConfig.&lt;T&gt;builder().build())</span>
+<span class="fc" id="L650">                .get();</span>
     }
 
     /** Polls a condition function until it signals done, using a custom configuration, blocking until complete. */

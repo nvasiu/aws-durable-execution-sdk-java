@@ -11,7 +11,6 @@ import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 import org.slf4j.LoggerFactory;
-import software.amazon.awssdk.services.lambda.model.OperationType;
 import software.amazon.lambda.durable.DurableCallbackFuture;
 import software.amazon.lambda.durable.DurableConfig;
 import software.amazon.lambda.durable.DurableContext;
@@ -58,8 +57,8 @@ import software.amazon.lambda.durable.util.ParameterValidator;
 public class DurableContextImpl extends BaseContextImpl implements DurableContext {
     private static final String WAIT_FOR_CALLBACK_CALLBACK_SUFFIX = &quot;-callback&quot;;
     private static final String WAIT_FOR_CALLBACK_SUBMITTER_SUFFIX = &quot;-submitter&quot;;
-<span class="fc" id="L61">    private static final int MAX_WAIT_FOR_CALLBACK_NAME_LENGTH = ParameterValidator.MAX_OPERATION_NAME_LENGTH</span>
-<span class="fc" id="L62">            - Math.max(WAIT_FOR_CALLBACK_CALLBACK_SUFFIX.length(), WAIT_FOR_CALLBACK_SUBMITTER_SUFFIX.length());</span>
+<span class="fc" id="L60">    private static final int MAX_WAIT_FOR_CALLBACK_NAME_LENGTH = ParameterValidator.MAX_OPERATION_NAME_LENGTH</span>
+<span class="fc" id="L61">            - Math.max(WAIT_FOR_CALLBACK_CALLBACK_SUFFIX.length(), WAIT_FOR_CALLBACK_SUBMITTER_SUFFIX.length());</span>
     private final OperationIdGenerator operationIdGenerator;
     private final DurableContextImpl parentContext;
     private final boolean isVirtual;
@@ -74,11 +73,11 @@ public class DurableContextImpl extends BaseContextImpl implements DurableContex
             String contextName,
             boolean isVirtual,
             DurableContextImpl parentContext) {
-<span class="fc" id="L77">        super(executionManager, durableConfig, lambdaContext, contextId, contextName, ThreadType.CONTEXT);</span>
-<span class="fc" id="L78">        operationIdGenerator = new OperationIdGenerator(contextId);</span>
-<span class="fc" id="L79">        this.parentContext = parentContext;</span>
-<span class="fc" id="L80">        this.isVirtual = isVirtual;</span>
-<span class="fc" id="L81">    }</span>
+<span class="fc" id="L76">        super(executionManager, durableConfig, lambdaContext, contextId, contextName, ThreadType.CONTEXT);</span>
+<span class="fc" id="L77">        operationIdGenerator = new OperationIdGenerator(contextId);</span>
+<span class="fc" id="L78">        this.parentContext = parentContext;</span>
+<span class="fc" id="L79">        this.isVirtual = isVirtual;</span>
+<span class="fc" id="L80">    }</span>
 
     /**
      * Creates a root context (contextId = null)
@@ -92,7 +91,7 @@ public class DurableContextImpl extends BaseContextImpl implements DurableContex
      */
     public static DurableContextImpl createRootContext(
             ExecutionManager executionManager, DurableConfig durableConfig, Context lambdaContext) {
-<span class="fc" id="L95">        return new DurableContextImpl(executionManager, durableConfig, lambdaContext, null, null, false, null);</span>
+<span class="fc" id="L94">        return new DurableContextImpl(executionManager, durableConfig, lambdaContext, null, null, false, null);</span>
     }
 
     /**
@@ -104,10 +103,10 @@ public class DurableContextImpl extends BaseContextImpl implements DurableContex
      * @return a new DurableContext for the child context
      */
     public DurableContextImpl createChildContext(String childContextId, String childContextName, boolean isVirtual) {
-<span class="fc" id="L107">        return new DurableContextImpl(</span>
-<span class="fc" id="L108">                getExecutionManager(),</span>
-<span class="fc" id="L109">                getDurableConfig(),</span>
-<span class="fc" id="L110">                getLambdaContext(),</span>
+<span class="fc" id="L106">        return new DurableContextImpl(</span>
+<span class="fc" id="L107">                getExecutionManager(),</span>
+<span class="fc" id="L108">                getDurableConfig(),</span>
+<span class="fc" id="L109">                getLambdaContext(),</span>
                 childContextId,
                 childContextName,
                 isVirtual,
@@ -123,10 +122,10 @@ public class DurableContextImpl extends BaseContextImpl implements DurableContex
      * @return a new StepContext instance
      */
     public StepContextImpl createStepContext(String stepOperationId, String stepOperationName, int attempt) {
-<span class="fc" id="L126">        return new StepContextImpl(</span>
-<span class="fc" id="L127">                getExecutionManager(),</span>
-<span class="fc" id="L128">                getDurableConfig(),</span>
-<span class="fc" id="L129">                getLambdaContext(),</span>
+<span class="fc" id="L125">        return new StepContextImpl(</span>
+<span class="fc" id="L126">                getExecutionManager(),</span>
+<span class="fc" id="L127">                getDurableConfig(),</span>
+<span class="fc" id="L128">                getLambdaContext(),</span>
                 stepOperationId,
                 stepOperationName,
                 attempt);
@@ -135,82 +134,82 @@ public class DurableContextImpl extends BaseContextImpl implements DurableContex
     @Override
     public &lt;T&gt; DurableFuture&lt;T&gt; stepAsync(
             String name, TypeToken&lt;T&gt; resultType, Function&lt;StepContext, T&gt; func, StepConfig config) {
-<span class="fc" id="L138">        Objects.requireNonNull(config, &quot;config cannot be null&quot;);</span>
-<span class="fc" id="L139">        Objects.requireNonNull(resultType, &quot;resultType cannot be null&quot;);</span>
-<span class="fc" id="L140">        ParameterValidator.validateOperationName(name);</span>
+<span class="fc" id="L137">        Objects.requireNonNull(config, &quot;config cannot be null&quot;);</span>
+<span class="fc" id="L138">        Objects.requireNonNull(resultType, &quot;resultType cannot be null&quot;);</span>
+<span class="fc" id="L139">        ParameterValidator.validateOperationName(name);</span>
 
-<span class="fc bfc" id="L142" title="All 2 branches covered.">        if (config.serDes() == null) {</span>
-<span class="fc" id="L143">            config = config.toBuilder().serDes(getDurableConfig().getSerDes()).build();</span>
+<span class="fc bfc" id="L141" title="All 2 branches covered.">        if (config.serDes() == null) {</span>
+<span class="fc" id="L142">            config = config.toBuilder().serDes(getDurableConfig().getSerDes()).build();</span>
         }
-<span class="fc" id="L145">        var operationId = nextOperationId();</span>
+<span class="fc" id="L144">        var operationId = nextOperationId();</span>
 
         // Create and start step operation with TypeToken
-<span class="fc" id="L148">        var operation = new StepOperation&lt;&gt;(</span>
-<span class="fc" id="L149">                OperationIdentifier.of(operationId, name, OperationType.STEP), func, resultType, config, this);</span>
+<span class="fc" id="L147">        var operation = new StepOperation&lt;&gt;(</span>
+<span class="fc" id="L148">                OperationIdentifier.of(operationId, name, OperationSubType.STEP), func, resultType, config, this);</span>
 
-<span class="fc" id="L151">        operation.execute(); // Start the step (returns immediately)</span>
+<span class="fc" id="L150">        operation.execute(); // Start the step (returns immediately)</span>
 
-<span class="fc" id="L153">        return operation;</span>
+<span class="fc" id="L152">        return operation;</span>
     }
 
     @Override
     public DurableFuture&lt;Void&gt; waitAsync(String name, Duration duration) {
-<span class="fc" id="L158">        ParameterValidator.validateDuration(duration, &quot;Wait duration&quot;);</span>
-<span class="fc" id="L159">        ParameterValidator.validateOperationName(name);</span>
+<span class="fc" id="L157">        ParameterValidator.validateDuration(duration, &quot;Wait duration&quot;);</span>
+<span class="fc" id="L158">        ParameterValidator.validateOperationName(name);</span>
 
-<span class="fc" id="L161">        var operationId = nextOperationId();</span>
+<span class="fc" id="L160">        var operationId = nextOperationId();</span>
 
         // Create and start wait operation
-<span class="fc" id="L164">        var operation =</span>
-<span class="fc" id="L165">                new WaitOperation(OperationIdentifier.of(operationId, name, OperationType.WAIT), duration, this);</span>
+<span class="fc" id="L163">        var operation =</span>
+<span class="fc" id="L164">                new WaitOperation(OperationIdentifier.of(operationId, name, OperationSubType.WAIT), duration, this);</span>
 
-<span class="fc" id="L167">        operation.execute(); // Checkpoint the wait</span>
-<span class="fc" id="L168">        return operation;</span>
+<span class="fc" id="L166">        operation.execute(); // Checkpoint the wait</span>
+<span class="fc" id="L167">        return operation;</span>
     }
 
     @Override
     public &lt;T, U&gt; DurableFuture&lt;T&gt; invokeAsync(
             String name, String functionName, U payload, TypeToken&lt;T&gt; resultType, InvokeConfig config) {
-<span class="fc" id="L174">        Objects.requireNonNull(config, &quot;config cannot be null&quot;);</span>
-<span class="fc" id="L175">        Objects.requireNonNull(resultType, &quot;resultType cannot be null&quot;);</span>
-<span class="fc" id="L176">        ParameterValidator.validateOperationName(name);</span>
+<span class="fc" id="L173">        Objects.requireNonNull(config, &quot;config cannot be null&quot;);</span>
+<span class="fc" id="L174">        Objects.requireNonNull(resultType, &quot;resultType cannot be null&quot;);</span>
+<span class="fc" id="L175">        ParameterValidator.validateOperationName(name);</span>
 
-<span class="pc bpc" id="L178" title="1 of 2 branches missed.">        if (config.serDes() == null) {</span>
-<span class="fc" id="L179">            config = config.toBuilder().serDes(getDurableConfig().getSerDes()).build();</span>
+<span class="pc bpc" id="L177" title="1 of 2 branches missed.">        if (config.serDes() == null) {</span>
+<span class="fc" id="L178">            config = config.toBuilder().serDes(getDurableConfig().getSerDes()).build();</span>
         }
-<span class="pc bpc" id="L181" title="1 of 2 branches missed.">        if (config.payloadSerDes() == null) {</span>
-<span class="fc" id="L182">            config = config.toBuilder()</span>
-<span class="fc" id="L183">                    .payloadSerDes(getDurableConfig().getSerDes())</span>
-<span class="fc" id="L184">                    .build();</span>
+<span class="pc bpc" id="L180" title="1 of 2 branches missed.">        if (config.payloadSerDes() == null) {</span>
+<span class="fc" id="L181">            config = config.toBuilder()</span>
+<span class="fc" id="L182">                    .payloadSerDes(getDurableConfig().getSerDes())</span>
+<span class="fc" id="L183">                    .build();</span>
         }
-<span class="fc" id="L186">        var operationId = nextOperationId();</span>
+<span class="fc" id="L185">        var operationId = nextOperationId();</span>
 
         // Create and start invoke operation
-<span class="fc" id="L189">        var operation = new InvokeOperation&lt;&gt;(</span>
-<span class="fc" id="L190">                OperationIdentifier.of(operationId, name, OperationType.CHAINED_INVOKE),</span>
+<span class="fc" id="L188">        var operation = new InvokeOperation&lt;&gt;(</span>
+<span class="fc" id="L189">                OperationIdentifier.of(operationId, name, OperationSubType.CHAINED_INVOKE),</span>
                 functionName,
                 payload,
                 resultType,
                 config,
                 this);
 
-<span class="fc" id="L197">        operation.execute(); // checkpoint the invoke operation</span>
-<span class="fc" id="L198">        return operation; // Block (will throw SuspendExecutionException if needed)</span>
+<span class="fc" id="L196">        operation.execute(); // checkpoint the invoke operation</span>
+<span class="fc" id="L197">        return operation; // Block (will throw SuspendExecutionException if needed)</span>
     }
 
     @Override
     public &lt;T&gt; DurableCallbackFuture&lt;T&gt; createCallback(String name, TypeToken&lt;T&gt; resultType, CallbackConfig config) {
-<span class="fc" id="L203">        ParameterValidator.validateOperationName(name);</span>
-<span class="fc bfc" id="L204" title="All 2 branches covered.">        if (config.serDes() == null) {</span>
-<span class="fc" id="L205">            config = config.toBuilder().serDes(getDurableConfig().getSerDes()).build();</span>
+<span class="fc" id="L202">        ParameterValidator.validateOperationName(name);</span>
+<span class="fc bfc" id="L203" title="All 2 branches covered.">        if (config.serDes() == null) {</span>
+<span class="fc" id="L204">            config = config.toBuilder().serDes(getDurableConfig().getSerDes()).build();</span>
         }
-<span class="fc" id="L207">        var operationId = nextOperationId();</span>
+<span class="fc" id="L206">        var operationId = nextOperationId();</span>
 
-<span class="fc" id="L209">        var operation = new CallbackOperation&lt;&gt;(</span>
-<span class="fc" id="L210">                OperationIdentifier.of(operationId, name, OperationType.CALLBACK), resultType, config, this);</span>
-<span class="fc" id="L211">        operation.execute();</span>
+<span class="fc" id="L208">        var operation = new CallbackOperation&lt;&gt;(</span>
+<span class="fc" id="L209">                OperationIdentifier.of(operationId, name, OperationSubType.CALLBACK), resultType, config, this);</span>
+<span class="fc" id="L210">        operation.execute();</span>
 
-<span class="fc" id="L213">        return operation;</span>
+<span class="fc" id="L212">        return operation;</span>
     }
 
     /**
@@ -228,7 +227,7 @@ public class DurableContextImpl extends BaseContextImpl implements DurableContex
     @Override
     public &lt;T&gt; DurableFuture&lt;T&gt; runInChildContextAsync(
             String name, TypeToken&lt;T&gt; resultType, Function&lt;DurableContext, T&gt; func, RunInChildContextConfig config) {
-<span class="fc" id="L231">        return runInChildContextAsync(name, resultType, func, config, OperationSubType.RUN_IN_CHILD_CONTEXT);</span>
+<span class="fc" id="L230">        return runInChildContextAsync(name, resultType, func, config, OperationSubType.RUN_IN_CHILD_CONTEXT);</span>
     }
 
     private &lt;T&gt; DurableFuture&lt;T&gt; runInChildContextAsync(
@@ -237,70 +236,66 @@ public class DurableContextImpl extends BaseContextImpl implements DurableContex
             Function&lt;DurableContext, T&gt; func,
             RunInChildContextConfig config,
             OperationSubType subType) {
-<span class="fc" id="L240">        Objects.requireNonNull(resultType, &quot;resultType cannot be null&quot;);</span>
-<span class="fc" id="L241">        Objects.requireNonNull(config, &quot;RunInChildContextConfig cannot be null&quot;);</span>
-<span class="fc" id="L242">        ParameterValidator.validateOperationName(name);</span>
+<span class="fc" id="L239">        Objects.requireNonNull(resultType, &quot;resultType cannot be null&quot;);</span>
+<span class="fc" id="L240">        Objects.requireNonNull(config, &quot;RunInChildContextConfig cannot be null&quot;);</span>
+<span class="fc" id="L241">        ParameterValidator.validateOperationName(name);</span>
 
-<span class="fc bfc" id="L244" title="All 2 branches covered.">        if (config.serDes() == null) {</span>
-<span class="fc" id="L245">            config = config.toBuilder().serDes(getDurableConfig().getSerDes()).build();</span>
+<span class="fc bfc" id="L243" title="All 2 branches covered.">        if (config.serDes() == null) {</span>
+<span class="fc" id="L244">            config = config.toBuilder().serDes(getDurableConfig().getSerDes()).build();</span>
         }
 
-<span class="fc" id="L248">        var operationId = nextOperationId();</span>
+<span class="fc" id="L247">        var operationId = nextOperationId();</span>
 
-<span class="fc" id="L250">        var operation = new ChildContextOperation&lt;&gt;(</span>
-<span class="fc" id="L251">                OperationIdentifier.of(operationId, name, OperationType.CONTEXT, subType),</span>
-                func,
-                resultType,
-                config,
-                this);
+<span class="fc" id="L249">        var operation = new ChildContextOperation&lt;&gt;(</span>
+<span class="fc" id="L250">                OperationIdentifier.of(operationId, name, subType), func, resultType, config, this);</span>
 
-<span class="fc" id="L257">        operation.execute();</span>
-<span class="fc" id="L258">        return operation;</span>
+<span class="fc" id="L252">        operation.execute();</span>
+<span class="fc" id="L253">        return operation;</span>
     }
 
     @Override
     public &lt;I, O&gt; DurableFuture&lt;MapResult&lt;O&gt;&gt; mapAsync(
             String name, Collection&lt;I&gt; items, TypeToken&lt;O&gt; resultType, MapFunction&lt;I, O&gt; function, MapConfig config) {
-<span class="fc" id="L264">        Objects.requireNonNull(items, &quot;items cannot be null&quot;);</span>
-<span class="fc" id="L265">        Objects.requireNonNull(function, &quot;function cannot be null&quot;);</span>
-<span class="fc" id="L266">        Objects.requireNonNull(resultType, &quot;resultType cannot be null&quot;);</span>
-<span class="fc" id="L267">        Objects.requireNonNull(config, &quot;config cannot be null&quot;);</span>
-<span class="fc" id="L268">        ParameterValidator.validateOperationName(name);</span>
-<span class="fc" id="L269">        ParameterValidator.validateOrderedCollection(items);</span>
+<span class="fc" id="L259">        Objects.requireNonNull(items, &quot;items cannot be null&quot;);</span>
+<span class="fc" id="L260">        Objects.requireNonNull(function, &quot;function cannot be null&quot;);</span>
+<span class="fc" id="L261">        Objects.requireNonNull(resultType, &quot;resultType cannot be null&quot;);</span>
+<span class="fc" id="L262">        Objects.requireNonNull(config, &quot;config cannot be null&quot;);</span>
+<span class="fc" id="L263">        ParameterValidator.validateOperationName(name);</span>
+<span class="fc" id="L264">        ParameterValidator.validateOrderedCollection(items);</span>
 
-<span class="fc bfc" id="L271" title="All 2 branches covered.">        if (config.serDes() == null) {</span>
-<span class="fc" id="L272">            config = config.toBuilder().serDes(getDurableConfig().getSerDes()).build();</span>
+<span class="fc bfc" id="L266" title="All 2 branches covered.">        if (config.serDes() == null) {</span>
+<span class="fc" id="L267">            config = config.toBuilder().serDes(getDurableConfig().getSerDes()).build();</span>
         }
 
         // Convert to List for deterministic index-based access
-<span class="fc" id="L276">        var itemList = List.copyOf(items);</span>
-<span class="fc" id="L277">        var operationId = nextOperationId();</span>
+<span class="fc" id="L271">        var itemList = List.copyOf(items);</span>
+<span class="fc" id="L272">        var operationId = nextOperationId();</span>
 
-<span class="fc" id="L279">        var operation = new MapOperation&lt;&gt;(</span>
-<span class="fc" id="L280">                OperationIdentifier.of(operationId, name, OperationType.CONTEXT, OperationSubType.MAP),</span>
+<span class="fc" id="L274">        var operation = new MapOperation&lt;&gt;(</span>
+<span class="fc" id="L275">                OperationIdentifier.of(operationId, name, OperationSubType.MAP),</span>
                 itemList,
                 function,
                 resultType,
                 config,
                 this);
-<span class="fc" id="L286">        operation.execute();</span>
-<span class="fc" id="L287">        return operation;</span>
+<span class="fc" id="L281">        operation.execute();</span>
+<span class="fc" id="L282">        return operation;</span>
     }
 
     @Override
     public ParallelDurableFuture parallel(String name, ParallelConfig config) {
-<span class="fc" id="L292">        Objects.requireNonNull(config, &quot;config cannot be null&quot;);</span>
-<span class="fc" id="L293">        var operationId = nextOperationId();</span>
+<span class="fc" id="L287">        Objects.requireNonNull(config, &quot;config cannot be null&quot;);</span>
+<span class="fc" id="L288">        var operationId = nextOperationId();</span>
 
-<span class="fc" id="L295">        var parallelOp = new ParallelOperation(</span>
-<span class="fc" id="L296">                OperationIdentifier.of(operationId, name, OperationType.CONTEXT, OperationSubType.PARALLEL),</span>
-<span class="fc" id="L297">                getDurableConfig().getSerDes(),</span>
+<span class="fc" id="L290">        var parallelOp = new ParallelOperation(</span>
+<span class="fc" id="L291">                OperationIdentifier.of(operationId, name, OperationSubType.PARALLEL),</span>
+<span class="fc" id="L292">                getDurableConfig().getSerDes(),</span>
                 this,
                 config);
 
-<span class="fc" id="L301">        parallelOp.execute();</span>
+<span class="fc" id="L296">        parallelOp.execute();</span>
 
-<span class="fc" id="L303">        return parallelOp;</span>
+<span class="fc" id="L298">        return parallelOp;</span>
     }
 
     @Override
@@ -309,41 +304,41 @@ public class DurableContextImpl extends BaseContextImpl implements DurableContex
             TypeToken&lt;T&gt; resultType,
             BiConsumer&lt;String, StepContext&gt; func,
             WaitForCallbackConfig waitForCallbackConfig) {
-<span class="fc" id="L312">        Objects.requireNonNull(resultType, &quot;resultType cannot be null&quot;);</span>
-<span class="fc" id="L313">        Objects.requireNonNull(waitForCallbackConfig, &quot;waitForCallbackConfig cannot be null&quot;);</span>
+<span class="fc" id="L307">        Objects.requireNonNull(resultType, &quot;resultType cannot be null&quot;);</span>
+<span class="fc" id="L308">        Objects.requireNonNull(waitForCallbackConfig, &quot;waitForCallbackConfig cannot be null&quot;);</span>
         // waitForCallback adds a suffix for the callback operation name and the submitter operation name so
         // the length restriction of waitForCallback name is different from the other operations.
-<span class="fc" id="L316">        ParameterValidator.validateOperationName(name, MAX_WAIT_FOR_CALLBACK_NAME_LENGTH);</span>
+<span class="fc" id="L311">        ParameterValidator.validateOperationName(name, MAX_WAIT_FOR_CALLBACK_NAME_LENGTH);</span>
 
-<span class="fc bfc" id="L318" title="All 2 branches covered.">        var finalWaitForCallbackConfig = waitForCallbackConfig.stepConfig().serDes() == null</span>
-<span class="fc" id="L319">                ? waitForCallbackConfig.toBuilder()</span>
-<span class="fc" id="L320">                        .stepConfig(waitForCallbackConfig.stepConfig().toBuilder()</span>
-<span class="fc" id="L321">                                .serDes(getDurableConfig().getSerDes())</span>
-<span class="fc" id="L322">                                .build())</span>
-<span class="fc" id="L323">                        .build()</span>
-<span class="fc" id="L324">                : waitForCallbackConfig;</span>
+<span class="fc bfc" id="L313" title="All 2 branches covered.">        var finalWaitForCallbackConfig = waitForCallbackConfig.stepConfig().serDes() == null</span>
+<span class="fc" id="L314">                ? waitForCallbackConfig.toBuilder()</span>
+<span class="fc" id="L315">                        .stepConfig(waitForCallbackConfig.stepConfig().toBuilder()</span>
+<span class="fc" id="L316">                                .serDes(getDurableConfig().getSerDes())</span>
+<span class="fc" id="L317">                                .build())</span>
+<span class="fc" id="L318">                        .build()</span>
+<span class="fc" id="L319">                : waitForCallbackConfig;</span>
 
-<span class="fc" id="L326">        return runInChildContextAsync(</span>
+<span class="fc" id="L321">        return runInChildContextAsync(</span>
                 name,
                 resultType,
                 childCtx -&gt; {
-<span class="fc" id="L330">                    var callback = childCtx.createCallback(</span>
+<span class="fc" id="L325">                    var callback = childCtx.createCallback(</span>
                             name + WAIT_FOR_CALLBACK_CALLBACK_SUFFIX,
                             resultType,
-<span class="fc" id="L333">                            finalWaitForCallbackConfig.callbackConfig());</span>
-<span class="fc" id="L334">                    childCtx.step(</span>
+<span class="fc" id="L328">                            finalWaitForCallbackConfig.callbackConfig());</span>
+<span class="fc" id="L329">                    childCtx.step(</span>
                             name + WAIT_FOR_CALLBACK_SUBMITTER_SUFFIX,
                             Void.class,
                             stepCtx -&gt; {
-<span class="fc" id="L338">                                func.accept(callback.callbackId(), stepCtx);</span>
-<span class="fc" id="L339">                                return null;</span>
+<span class="fc" id="L333">                                func.accept(callback.callbackId(), stepCtx);</span>
+<span class="fc" id="L334">                                return null;</span>
                             },
-<span class="fc" id="L341">                            finalWaitForCallbackConfig.stepConfig());</span>
-<span class="fc" id="L342">                    return callback.get();</span>
+<span class="fc" id="L336">                            finalWaitForCallbackConfig.stepConfig());</span>
+<span class="fc" id="L337">                    return callback.get();</span>
                 },
-<span class="fc" id="L344">                RunInChildContextConfig.builder()</span>
-<span class="fc" id="L345">                        .serDes(finalWaitForCallbackConfig.stepConfig().serDes())</span>
-<span class="fc" id="L346">                        .build(),</span>
+<span class="fc" id="L339">                RunInChildContextConfig.builder()</span>
+<span class="fc" id="L340">                        .serDes(finalWaitForCallbackConfig.stepConfig().serDes())</span>
+<span class="fc" id="L341">                        .build(),</span>
                 OperationSubType.WAIT_FOR_CALLBACK);
     }
 
@@ -353,17 +348,22 @@ public class DurableContextImpl extends BaseContextImpl implements DurableContex
             TypeToken&lt;T&gt; resultType,
             BiFunction&lt;T, StepContext, WaitForConditionResult&lt;T&gt;&gt; checkFunc,
             WaitForConditionConfig&lt;T&gt; config) {
-<span class="fc" id="L356">        Objects.requireNonNull(config, &quot;config cannot be null&quot;);</span>
-<span class="fc" id="L357">        Objects.requireNonNull(resultType, &quot;resultType cannot be null&quot;);</span>
-<span class="fc" id="L358">        Objects.requireNonNull(checkFunc, &quot;checkFunc cannot be null&quot;);</span>
-<span class="fc" id="L359">        ParameterValidator.validateOperationName(name);</span>
+<span class="fc" id="L351">        Objects.requireNonNull(config, &quot;config cannot be null&quot;);</span>
+<span class="fc" id="L352">        Objects.requireNonNull(resultType, &quot;resultType cannot be null&quot;);</span>
+<span class="fc" id="L353">        Objects.requireNonNull(checkFunc, &quot;checkFunc cannot be null&quot;);</span>
+<span class="fc" id="L354">        ParameterValidator.validateOperationName(name);</span>
 
-<span class="pc bpc" id="L361" title="1 of 2 branches missed.">        if (config.serDes() == null) {</span>
-<span class="fc" id="L362">            config = config.toBuilder().serDes(getDurableConfig().getSerDes()).build();</span>
+<span class="pc bpc" id="L356" title="1 of 2 branches missed.">        if (config.serDes() == null) {</span>
+<span class="fc" id="L357">            config = config.toBuilder().serDes(getDurableConfig().getSerDes()).build();</span>
         }
-<span class="fc" id="L364">        var operationId = nextOperationId();</span>
+<span class="fc" id="L359">        var operationId = nextOperationId();</span>
 
-<span class="fc" id="L366">        var operation = new WaitForConditionOperation&lt;&gt;(operationId, name, checkFunc, resultType, config, this);</span>
+<span class="fc" id="L361">        var operation = new WaitForConditionOperation&lt;&gt;(</span>
+<span class="fc" id="L362">                OperationIdentifier.of(operationId, name, OperationSubType.WAIT_FOR_CONDITION),</span>
+                checkFunc,
+                resultType,
+                config,
+                this);
 
 <span class="fc" id="L368">        operation.execute();</span>
 

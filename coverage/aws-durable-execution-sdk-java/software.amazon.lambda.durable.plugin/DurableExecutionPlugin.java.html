@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>DurableExecutionPlugin.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">AWS Lambda Durable Execution SDK Coverage Report</a> &gt; <a href="../index.html" class="el_bundle">aws-durable-execution-sdk-java</a> &gt; <a href="index.source.html" class="el_package">software.amazon.lambda.durable.plugin</a> &gt; <span class="el_source">DurableExecutionPlugin.java</span></div><h1>DurableExecutionPlugin.java</h1><pre class="source lang-java linenums">// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+package software.amazon.lambda.durable.plugin;
+
+/**
+ * Plugin interface for instrumenting durable execution lifecycle events.
+ *
+ * &lt;p&gt;Implement this interface to integrate observability tools (OpenTelemetry, Datadog, etc.) with the durable
+ * execution SDK. The SDK calls these hooks at key lifecycle points without requiring modifications to core SDK code.
+ *
+ * &lt;p&gt;All methods have default no-op implementations, allowing plugins to override only the hooks they need.
+ *
+ * &lt;p&gt;Plugin errors are isolated — exceptions thrown by plugin methods are caught and logged but never disrupt SDK
+ * execution.
+ *
+ * @deprecated This is a preview API that is experimental and may be changed or removed in future releases.
+ */
+@Deprecated
+public interface DurableExecutionPlugin {
+
+    // ─── Invocation-level hooks ──────────────────────────────────────────
+
+    /**
+     * Called at the start of each Lambda invocation. Use to set up per-invocation state (trace ID, invocation span).
+     *
+     * &lt;p&gt;Check {@link InvocationInfo#isFirstInvocation()} to detect the first invocation of an execution (useful for
+     * sampling decisions or execution-level span creation).
+     */
+<span class="nc" id="L29">    default void onInvocationStart(InvocationInfo info) {}</span>
+
+    /**
+     * Called at the end of each Lambda invocation. Use to flush spans/metrics before Lambda freezes.
+     *
+     * &lt;p&gt;This hook is awaited — the SDK blocks until it returns. This is the only safe flush point before Lambda
+     * freezes the execution environment.
+     *
+     * &lt;p&gt;Check {@link InvocationEndInfo#invocationStatus()} to detect if the execution reached a terminal state in this
+     * invocation (useful for writing summary records or flushing final data).
+     */
+<span class="nc" id="L40">    default void onInvocationEnd(InvocationEndInfo info) {}</span>
+
+    // ─── Operation-level hooks ───────────────────────────────────────────
+
+    /** Called when an operation starts (including replay). Use for logging/metrics that want replay visibility. */
+<span class="nc" id="L45">    default void onOperationStart(OperationInfo info) {}</span>
+
+    /**
+     * Called when an operation reaches a terminal status for the first time (not on replay).
+     *
+     * &lt;p&gt;The OTel plugin creates operation spans here with backfilled start/end timestamps.
+     */
+<span class="nc" id="L52">    default void onOperationEnd(OperationEndInfo info) {}</span>
+
+    // ─── User function hooks ─────────────────────────────────────────────
+
+    /**
+     * Called when a user-provided function starts executing. This fires for both step attempts (with {@code attempt}
+     * set) and child context functions (with {@code attempt} null).
+     *
+     * &lt;p&gt;This hook fires on the same thread as user code, so plugins can set OTel context via
+     * {@code Context.makeCurrent()} here.
+     */
+<span class="nc" id="L63">    default void onUserFunctionStart(UserFunctionStartInfo info) {}</span>
+
+    /**
+     * Called when a user-provided function finishes executing. This fires for both step attempts and child context
+     * functions.
+     *
+     * &lt;p&gt;This hook fires on the same thread as user code, so plugins can close OTel scopes here.
+     */
+<span class="nc" id="L71">    default void onUserFunctionEnd(UserFunctionEndInfo info) {}</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

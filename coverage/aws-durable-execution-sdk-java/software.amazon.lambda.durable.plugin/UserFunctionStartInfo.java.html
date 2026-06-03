@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>UserFunctionStartInfo.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">AWS Lambda Durable Execution SDK Coverage Report</a> &gt; <a href="../index.html" class="el_bundle">aws-durable-execution-sdk-java</a> &gt; <a href="index.source.html" class="el_package">software.amazon.lambda.durable.plugin</a> &gt; <span class="el_source">UserFunctionStartInfo.java</span></div><h1>UserFunctionStartInfo.java</h1><pre class="source lang-java linenums">// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+package software.amazon.lambda.durable.plugin;
+
+import java.time.Instant;
+
+/**
+ * Information provided when a user function starts executing.
+ *
+ * &lt;p&gt;This fires for both step attempts and child context functions, on the same thread as the user code. For steps,
+ * {@code attempt} is non-null (1-based). For context operations, {@code attempt} is null.
+ *
+ * @param id operation ID
+ * @param name human-readable operation name (may be null)
+ * @param type operation type (STEP, CONTEXT, etc.)
+ * @param subType operation sub-type (Map, Parallel, WaitForCondition, etc.) — may be null
+ * @param parentId parent operation ID (null for root-level operations)
+ * @param startTimestamp when the user function started
+ * @param isReplayingChildren true if child operations within this context are being replayed from checkpoints
+ * @param attempt 1-based attempt number for steps/waitForCondition, null for context operations
+ * @deprecated This is a preview API that is experimental and may be changed or removed in future releases.
+ */
+@Deprecated
+<span class="fc" id="L24">public record UserFunctionStartInfo(</span>
+        String id,
+        String name,
+        String type,
+        String subType,
+        String parentId,
+        Instant startTimestamp,
+        boolean isReplayingChildren,
+        Integer attempt) {}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

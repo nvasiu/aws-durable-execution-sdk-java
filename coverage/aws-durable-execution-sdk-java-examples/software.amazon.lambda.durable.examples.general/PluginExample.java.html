@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>PluginExample.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">AWS Lambda Durable Execution SDK Coverage Report</a> &gt; <a href="../index.html" class="el_bundle">aws-durable-execution-sdk-java-examples</a> &gt; <a href="index.source.html" class="el_package">software.amazon.lambda.durable.examples.general</a> &gt; <span class="el_source">PluginExample.java</span></div><h1>PluginExample.java</h1><pre class="source lang-java linenums">// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+package software.amazon.lambda.durable.examples.general;
+
+import software.amazon.lambda.durable.DurableConfig;
+import software.amazon.lambda.durable.DurableContext;
+import software.amazon.lambda.durable.DurableHandler;
+import software.amazon.lambda.durable.examples.types.GreetingRequest;
+import software.amazon.lambda.durable.plugin.*;
+
+/**
+ * Example demonstrating plugin instrumentation with the Durable Execution SDK.
+ *
+ * &lt;p&gt;This handler registers a simple logging plugin that prints lifecycle events to stdout (which appears in CloudWatch
+ * Logs when deployed). Deploy this and check CloudWatch to verify all hooks fire at the right times.
+ *
+ * &lt;p&gt;Expected output for a successful run:
+ *
+ * &lt;pre&gt;
+ * [PLUGIN] onInvocationStart: requestId=..., executionArn=..., firstInvocation=true
+ * [PLUGIN] onOperationStart: name=create-greeting, type=STEP
+ * [PLUGIN] onUserFunctionStart: name=create-greeting, attempt=1
+ * [PLUGIN] onUserFunctionEnd: name=create-greeting, succeeded=true
+ * [PLUGIN] onOperationEnd: name=create-greeting
+ * [PLUGIN] onOperationStart: name=transform, type=STEP
+ * [PLUGIN] onUserFunctionStart: name=transform, attempt=1
+ * [PLUGIN] onUserFunctionEnd: name=transform, succeeded=true
+ * [PLUGIN] onOperationEnd: name=transform
+ * [PLUGIN] onInvocationEnd: status=SUCCEEDED
+ * &lt;/pre&gt;
+ */
+<span class="fc" id="L32">public class PluginExample extends DurableHandler&lt;GreetingRequest, String&gt; {</span>
+
+    @Override
+    protected DurableConfig createConfiguration() {
+<span class="fc" id="L36">        return DurableConfig.builder().withPlugins(new LoggingPlugin()).build();</span>
+    }
+
+    @Override
+    public String handleRequest(GreetingRequest input, DurableContext context) {
+<span class="fc" id="L41">        context.getLogger().info(&quot;Starting plugin example for {}&quot;, input.getName());</span>
+
+<span class="fc" id="L43">        var greeting = context.step(&quot;create-greeting&quot;, String.class, stepCtx -&gt; &quot;Hello, &quot; + input.getName());</span>
+
+<span class="fc" id="L45">        var result = context.step(&quot;transform&quot;, String.class, stepCtx -&gt; greeting.toUpperCase() + &quot;!&quot;);</span>
+
+<span class="fc" id="L47">        context.getLogger().info(&quot;Plugin example complete: {}&quot;, result);</span>
+<span class="fc" id="L48">        return result;</span>
+    }
+
+    /** A simple plugin that logs all lifecycle events to stdout. In Lambda, stdout goes to CloudWatch Logs. */
+<span class="fc" id="L52">    static class LoggingPlugin implements DurableExecutionPlugin {</span>
+
+        @Override
+        public void onInvocationStart(InvocationInfo info) {
+<span class="fc" id="L56">            System.out.printf(</span>
+                    &quot;[PLUGIN] onInvocationStart: requestId=%s, executionArn=%s, firstInvocation=%s%n&quot;,
+<span class="fc" id="L58">                    info.requestId(), info.executionArn(), info.isFirstInvocation());</span>
+<span class="fc" id="L59">        }</span>
+
+        @Override
+        public void onInvocationEnd(InvocationEndInfo info) {
+<span class="fc" id="L63">            System.out.printf(</span>
+                    &quot;[PLUGIN] onInvocationEnd: status=%s, error=%s%n&quot;,
+<span class="fc" id="L65">                    info.invocationStatus(),</span>
+<span class="pc bpc" id="L66" title="1 of 2 branches missed.">                    info.executionError() != null ? info.executionError().getMessage() : null);</span>
+<span class="fc" id="L67">        }</span>
+
+        @Override
+        public void onOperationStart(OperationInfo info) {
+<span class="fc" id="L71">            System.out.printf(</span>
+<span class="fc" id="L72">                    &quot;[PLUGIN] onOperationStart: name=%s, type=%s, id=%s%n&quot;, info.name(), info.type(), info.id());</span>
+<span class="fc" id="L73">        }</span>
+
+        @Override
+        public void onOperationEnd(OperationEndInfo info) {
+<span class="fc" id="L77">            System.out.printf(</span>
+                    &quot;[PLUGIN] onOperationEnd: name=%s, type=%s, error=%s%n&quot;,
+<span class="fc" id="L79">                    info.name(),</span>
+<span class="fc" id="L80">                    info.type(),</span>
+<span class="pc bpc" id="L81" title="1 of 2 branches missed.">                    info.error() != null ? info.error().getMessage() : null);</span>
+<span class="fc" id="L82">        }</span>
+
+        @Override
+        public void onUserFunctionStart(UserFunctionStartInfo info) {
+<span class="fc" id="L86">            System.out.printf(</span>
+                    &quot;[PLUGIN] onUserFunctionStart: name=%s, type=%s, attempt=%s, isReplayingChildren=%s%n&quot;,
+<span class="fc" id="L88">                    info.name(), info.type(), info.attempt(), info.isReplayingChildren());</span>
+<span class="fc" id="L89">        }</span>
+
+        @Override
+        public void onUserFunctionEnd(UserFunctionEndInfo info) {
+<span class="fc" id="L93">            System.out.printf(</span>
+                    &quot;[PLUGIN] onUserFunctionEnd: name=%s, succeeded=%s, error=%s%n&quot;,
+<span class="fc" id="L95">                    info.name(),</span>
+<span class="fc" id="L96">                    info.succeeded(),</span>
+<span class="pc bpc" id="L97" title="1 of 2 branches missed.">                    info.error() != null ? info.error().getMessage() : null);</span>
+<span class="fc" id="L98">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

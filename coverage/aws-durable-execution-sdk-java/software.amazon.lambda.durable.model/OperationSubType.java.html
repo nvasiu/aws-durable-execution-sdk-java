@@ -2,36 +2,49 @@
 // SPDX-License-Identifier: Apache-2.0
 package software.amazon.lambda.durable.model;
 
+import software.amazon.awssdk.services.lambda.model.OperationType;
+
 /**
- * Fine-grained classification of durable operations beyond the basic operation types.
+ * Fine-grained classification of durable operations that pairs each subtype with its parent {@link OperationType}.
  *
- * &lt;p&gt;Used as the {@code subType} field in checkpoint updates for {@code CONTEXT} operations. Matches the
+ * &lt;p&gt;Used as the source of both the {@code type} and {@code subType} fields in checkpoint updates. Matches the
  * {@code OperationSubType} enum in the JavaScript and Python durable execution SDKs.
  */
-<span class="fc" id="L11">public enum OperationSubType {</span>
-<span class="fc" id="L12">    RUN_IN_CHILD_CONTEXT(&quot;RunInChildContext&quot;),</span>
-<span class="fc" id="L13">    MAP(&quot;Map&quot;),</span>
-<span class="fc" id="L14">    MAP_ITERATION(&quot;MapIteration&quot;),</span>
-<span class="fc" id="L15">    PARALLEL(&quot;Parallel&quot;),</span>
-<span class="fc" id="L16">    PARALLEL_BRANCH(&quot;ParallelBranch&quot;),</span>
-<span class="fc" id="L17">    WAIT_FOR_CALLBACK(&quot;WaitForCallback&quot;),</span>
-<span class="fc" id="L18">    WAIT_FOR_CONDITION(&quot;WaitForCondition&quot;),</span>
-<span class="fc" id="L19">    WITH_RETRY(&quot;WithRetry&quot;);</span>
+<span class="fc" id="L13">public enum OperationSubType {</span>
+<span class="fc" id="L14">    STEP(OperationType.STEP, &quot;Step&quot;),</span>
+<span class="fc" id="L15">    WAIT(OperationType.WAIT, &quot;Wait&quot;),</span>
+<span class="fc" id="L16">    CALLBACK(OperationType.CALLBACK, &quot;Callback&quot;),</span>
+<span class="fc" id="L17">    CHAINED_INVOKE(OperationType.CHAINED_INVOKE, &quot;ChainedInvoke&quot;),</span>
+<span class="fc" id="L18">    RUN_IN_CHILD_CONTEXT(OperationType.CONTEXT, &quot;RunInChildContext&quot;),</span>
+<span class="fc" id="L19">    MAP(OperationType.CONTEXT, &quot;Map&quot;),</span>
+<span class="fc" id="L20">    MAP_ITERATION(OperationType.CONTEXT, &quot;MapIteration&quot;),</span>
+<span class="fc" id="L21">    PARALLEL(OperationType.CONTEXT, &quot;Parallel&quot;),</span>
+<span class="fc" id="L22">    PARALLEL_BRANCH(OperationType.CONTEXT, &quot;ParallelBranch&quot;),</span>
+<span class="fc" id="L23">    WAIT_FOR_CALLBACK(OperationType.CONTEXT, &quot;WaitForCallback&quot;),</span>
+<span class="fc" id="L24">    WAIT_FOR_CONDITION(OperationType.STEP, &quot;WaitForCondition&quot;),</span>
+<span class="fc" id="L25">    WITH_RETRY(OperationType.CONTEXT, &quot;WithRetry&quot;);</span>
 
+    private final OperationType operationType;
     private final String value;
 
-<span class="fc" id="L23">    OperationSubType(String value) {</span>
-<span class="fc" id="L24">        this.value = value;</span>
-<span class="fc" id="L25">    }</span>
+<span class="fc" id="L30">    OperationSubType(OperationType operationType, String value) {</span>
+<span class="fc" id="L31">        this.operationType = operationType;</span>
+<span class="fc" id="L32">        this.value = value;</span>
+<span class="fc" id="L33">    }</span>
+
+    /** Returns the parent {@link OperationType} for this subtype. */
+    public OperationType getOperationType() {
+<span class="fc" id="L37">        return operationType;</span>
+    }
 
     /** Returns the wire-format string value sent in checkpoint updates. */
     public String getValue() {
-<span class="fc" id="L29">        return value;</span>
+<span class="fc" id="L42">        return value;</span>
     }
 
     @Override
     public String toString() {
-<span class="nc" id="L34">        return value;</span>
+<span class="nc" id="L47">        return value;</span>
     }
 }
 </pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

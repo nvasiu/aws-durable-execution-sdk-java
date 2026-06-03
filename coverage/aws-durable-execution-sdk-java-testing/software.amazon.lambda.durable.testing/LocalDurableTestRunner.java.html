@@ -20,6 +20,7 @@ import software.amazon.lambda.durable.TypeToken;
 import software.amazon.lambda.durable.execution.DurableExecutor;
 import software.amazon.lambda.durable.model.DurableExecutionInput;
 import software.amazon.lambda.durable.model.ExecutionStatus;
+import software.amazon.lambda.durable.plugin.DurableExecutionPlugin;
 import software.amazon.lambda.durable.serde.SerDes;
 import software.amazon.lambda.durable.testing.local.LocalMemoryExecutionClient;
 import software.amazon.lambda.durable.testing.local.OperationResult;
@@ -45,30 +46,31 @@ public class LocalDurableTestRunner&lt;I, O&gt; {
             TypeToken&lt;I&gt; inputType,
             TypeToken&lt;O&gt; outputType,
             BiFunction&lt;I, DurableContext, O&gt; handlerFn,
-<span class="fc" id="L48">            DurableConfig customerConfig) {</span>
-<span class="fc" id="L49">        this.inputType = inputType;</span>
-<span class="fc" id="L50">        this.outputType = outputType;</span>
-<span class="fc" id="L51">        this.handler = handlerFn;</span>
-<span class="fc" id="L52">        this.storage = new LocalMemoryExecutionClient();</span>
+<span class="fc" id="L49">            DurableConfig customerConfig) {</span>
+<span class="fc" id="L50">        this.inputType = inputType;</span>
+<span class="fc" id="L51">        this.outputType = outputType;</span>
+<span class="fc" id="L52">        this.handler = handlerFn;</span>
+<span class="fc" id="L53">        this.storage = new LocalMemoryExecutionClient();</span>
 
         // Create config that uses customer's configuration but overrides the client with in-memory storage
-<span class="fc bfc" id="L55" title="All 2 branches covered.">        if (customerConfig != null) {</span>
+<span class="fc bfc" id="L56" title="All 2 branches covered.">        if (customerConfig != null) {</span>
             // Use customer's config but override the client with our in-memory implementation
-<span class="fc" id="L57">            this.customerConfig = DurableConfig.builder()</span>
-<span class="fc" id="L58">                    .withDurableExecutionClient(storage)</span>
-<span class="fc" id="L59">                    .withSerDes(customerConfig.getSerDes())</span>
-<span class="fc" id="L60">                    .withExecutorService(customerConfig.getExecutorService())</span>
-<span class="fc" id="L61">                    .withPollingStrategy(customerConfig.getPollingStrategy())</span>
-<span class="fc" id="L62">                    .withCheckpointDelay(customerConfig.getCheckpointDelay())</span>
-<span class="fc" id="L63">                    .withLoggerConfig(customerConfig.getLoggerConfig())</span>
-<span class="fc" id="L64">                    .build();</span>
+<span class="fc" id="L58">            this.customerConfig = DurableConfig.builder()</span>
+<span class="fc" id="L59">                    .withDurableExecutionClient(storage)</span>
+<span class="fc" id="L60">                    .withSerDes(customerConfig.getSerDes())</span>
+<span class="fc" id="L61">                    .withExecutorService(customerConfig.getExecutorService())</span>
+<span class="fc" id="L62">                    .withPollingStrategy(customerConfig.getPollingStrategy())</span>
+<span class="fc" id="L63">                    .withCheckpointDelay(customerConfig.getCheckpointDelay())</span>
+<span class="fc" id="L64">                    .withLoggerConfig(customerConfig.getLoggerConfig())</span>
+<span class="fc" id="L65">                    .withPlugins(customerConfig.getPluginRunner().getPlugins().toArray(new DurableExecutionPlugin[0]))</span>
+<span class="fc" id="L66">                    .build();</span>
         } else {
             // Fallback to default config with in-memory client
-<span class="fc" id="L67">            this.customerConfig =</span>
-<span class="fc" id="L68">                    DurableConfig.builder().withDurableExecutionClient(storage).build();</span>
+<span class="fc" id="L69">            this.customerConfig =</span>
+<span class="fc" id="L70">                    DurableConfig.builder().withDurableExecutionClient(storage).build();</span>
         }
-<span class="fc" id="L70">        this.serDes = this.customerConfig.getSerDes();</span>
-<span class="fc" id="L71">    }</span>
+<span class="fc" id="L72">        this.serDes = this.customerConfig.getSerDes();</span>
+<span class="fc" id="L73">    }</span>
 
     /**
      * Creates a LocalDurableTestRunner with default configuration. Use this method when your handler uses the default
@@ -82,7 +84,7 @@ public class LocalDurableTestRunner&lt;I, O&gt; {
      */
     public static &lt;I, O&gt; LocalDurableTestRunner&lt;I, O&gt; create(
             Class&lt;I&gt; inputType, BiFunction&lt;I, DurableContext, O&gt; handlerFn) {
-<span class="fc" id="L85">        return new LocalDurableTestRunner&lt;&gt;(TypeToken.get(inputType), null, handlerFn, null);</span>
+<span class="fc" id="L87">        return new LocalDurableTestRunner&lt;&gt;(TypeToken.get(inputType), null, handlerFn, null);</span>
     }
 
     /**
@@ -103,7 +105,7 @@ public class LocalDurableTestRunner&lt;I, O&gt; {
      */
     public static &lt;I, O&gt; LocalDurableTestRunner&lt;I, O&gt; create(
             TypeToken&lt;I&gt; inputType, BiFunction&lt;I, DurableContext, O&gt; handlerFn) {
-<span class="fc" id="L106">        return new LocalDurableTestRunner&lt;&gt;(inputType, null, handlerFn, null);</span>
+<span class="fc" id="L108">        return new LocalDurableTestRunner&lt;&gt;(inputType, null, handlerFn, null);</span>
     }
 
     /**
@@ -119,7 +121,7 @@ public class LocalDurableTestRunner&lt;I, O&gt; {
      */
     public static &lt;I, O&gt; LocalDurableTestRunner&lt;I, O&gt; create(
             Class&lt;I&gt; inputType, BiFunction&lt;I, DurableContext, O&gt; handlerFn, DurableConfig config) {
-<span class="fc" id="L122">        return new LocalDurableTestRunner&lt;&gt;(TypeToken.get(inputType), null, handlerFn, config);</span>
+<span class="fc" id="L124">        return new LocalDurableTestRunner&lt;&gt;(TypeToken.get(inputType), null, handlerFn, config);</span>
     }
     /**
      * Creates a LocalDurableTestRunner that uses a custom configuration. This allows the test runner to use custom
@@ -157,7 +159,7 @@ public class LocalDurableTestRunner&lt;I, O&gt; {
      */
     public static &lt;I, O&gt; LocalDurableTestRunner&lt;I, O&gt; create(
             TypeToken&lt;I&gt; inputType, BiFunction&lt;I, DurableContext, O&gt; handlerFn, DurableConfig config) {
-<span class="nc" id="L160">        return new LocalDurableTestRunner&lt;&gt;(inputType, null, handlerFn, config);</span>
+<span class="nc" id="L162">        return new LocalDurableTestRunner&lt;&gt;(inputType, null, handlerFn, config);</span>
     }
 
     /**
@@ -172,8 +174,8 @@ public class LocalDurableTestRunner&lt;I, O&gt; {
      * @return LocalDurableTestRunner configured with the handler's settings
      */
     public static &lt;I, O&gt; LocalDurableTestRunner&lt;I, O&gt; create(Class&lt;I&gt; inputType, DurableHandler&lt;I, O&gt; handler) {
-<span class="fc" id="L175">        return new LocalDurableTestRunner&lt;&gt;(</span>
-<span class="fc" id="L176">                TypeToken.get(inputType), null, handler::handleRequest, handler.getConfiguration());</span>
+<span class="fc" id="L177">        return new LocalDurableTestRunner&lt;&gt;(</span>
+<span class="fc" id="L178">                TypeToken.get(inputType), null, handler::handleRequest, handler.getConfiguration());</span>
     }
 
     /**
@@ -181,17 +183,17 @@ public class LocalDurableTestRunner&lt;I, O&gt; {
      * a new runner instance.
      */
     public LocalDurableTestRunner&lt;I, O&gt; withDurableConfig(DurableConfig config) {
-<span class="nc" id="L184">        return new LocalDurableTestRunner&lt;&gt;(inputType, outputType, handler, config);</span>
+<span class="nc" id="L186">        return new LocalDurableTestRunner&lt;&gt;(inputType, outputType, handler, config);</span>
     }
 
     /** Overrides the output type for this test runner. */
     public LocalDurableTestRunner&lt;I, O&gt; withOutputType(TypeToken&lt;O&gt; outputType) {
-<span class="nc" id="L189">        return new LocalDurableTestRunner&lt;&gt;(inputType, outputType, handler, customerConfig);</span>
+<span class="nc" id="L191">        return new LocalDurableTestRunner&lt;&gt;(inputType, outputType, handler, customerConfig);</span>
     }
 
     /** Overrides the output type for this test runner. */
     public LocalDurableTestRunner&lt;I, O&gt; withOutputType(Class&lt;O&gt; outputType) {
-<span class="fc" id="L194">        return new LocalDurableTestRunner&lt;&gt;(inputType, TypeToken.get(outputType), handler, customerConfig);</span>
+<span class="fc" id="L196">        return new LocalDurableTestRunner&lt;&gt;(inputType, TypeToken.get(outputType), handler, customerConfig);</span>
     }
 
     /**
@@ -227,16 +229,16 @@ public class LocalDurableTestRunner&lt;I, O&gt; {
      * @return LocalDurableTestRunner configured with the handler's settings
      */
     public static &lt;I, O&gt; LocalDurableTestRunner&lt;I, O&gt; create(TypeToken&lt;I&gt; inputType, DurableHandler&lt;I, O&gt; handler) {
-<span class="fc" id="L230">        return new LocalDurableTestRunner&lt;&gt;(inputType, null, handler::handleRequest, handler.getConfiguration());</span>
+<span class="fc" id="L232">        return new LocalDurableTestRunner&lt;&gt;(inputType, null, handler::handleRequest, handler.getConfiguration());</span>
     }
 
     /** Run a single invocation (may return PENDING if waiting/retrying). */
     public TestResult&lt;O&gt; run(I input) {
-<span class="fc" id="L235">        var durableInput = createDurableInput(input);</span>
+<span class="fc" id="L237">        var durableInput = createDurableInput(input);</span>
 
-<span class="fc" id="L237">        var output = DurableExecutor.execute(durableInput, mockLambdaContext(), inputType, handler, customerConfig);</span>
+<span class="fc" id="L239">        var output = DurableExecutor.execute(durableInput, mockLambdaContext(), inputType, handler, customerConfig);</span>
 
-<span class="fc" id="L239">        return storage.toTestResult(output, outputType, serDes);</span>
+<span class="fc" id="L241">        return storage.toTestResult(output, outputType, serDes);</span>
     }
 
     /**
@@ -248,110 +250,110 @@ public class LocalDurableTestRunner&lt;I, O&gt; {
      * @return Final test result (SUCCEEDED or FAILED) or PENDING if operations pending manual intervention
      */
     public TestResult&lt;O&gt; runUntilComplete(I input) {
-<span class="fc" id="L251">        TestResult&lt;O&gt; result = null;</span>
-<span class="pc bpc" id="L252" title="1 of 2 branches missed.">        for (int i = 0; i &lt; MAX_INVOCATIONS; i++) {</span>
-<span class="fc" id="L253">            result = run(input);</span>
+<span class="fc" id="L253">        TestResult&lt;O&gt; result = null;</span>
+<span class="pc bpc" id="L254" title="1 of 2 branches missed.">        for (int i = 0; i &lt; MAX_INVOCATIONS; i++) {</span>
+<span class="fc" id="L255">            result = run(input);</span>
 
-<span class="pc bpc" id="L255" title="1 of 4 branches missed.">            if (result.getStatus() != ExecutionStatus.PENDING || !storage.advanceTime()) {</span>
+<span class="pc bpc" id="L257" title="1 of 4 branches missed.">            if (result.getStatus() != ExecutionStatus.PENDING || !storage.advanceTime()) {</span>
                 // break the loop if
                 // - Return SUCCEEDED or FAILED - we're done
                 // - Return PENDING and let test manually advance operations if no operations can be auto advanced
-<span class="nc" id="L259">                break;</span>
+<span class="nc" id="L261">                break;</span>
             }
         }
-<span class="fc" id="L262">        return result;</span>
+<span class="fc" id="L264">        return result;</span>
     }
 
     /** Resets a named step operation to STARTED status, simulating a checkpoint failure. */
     public void resetCheckpointToStarted(String stepName) {
-<span class="fc" id="L267">        storage.resetCheckpointToStarted(stepName);</span>
-<span class="fc" id="L268">    }</span>
+<span class="fc" id="L269">        storage.resetCheckpointToStarted(stepName);</span>
+<span class="fc" id="L270">    }</span>
 
     /** Removes a named step operation entirely, simulating loss of a fire-and-forget checkpoint. */
     public void simulateFireAndForgetCheckpointLoss(String stepName) {
-<span class="fc" id="L272">        storage.simulateFireAndForgetCheckpointLoss(stepName);</span>
-<span class="fc" id="L273">    }</span>
+<span class="fc" id="L274">        storage.simulateFireAndForgetCheckpointLoss(stepName);</span>
+<span class="fc" id="L275">    }</span>
 
     /** Returns the {@link TestOperation} for the given operation name, or null if not found. */
     public TestOperation getOperation(String name) {
-<span class="fc" id="L277">        var op = storage.getOperationByName(name);</span>
-<span class="pc bpc" id="L278" title="1 of 2 branches missed.">        return op != null ? new TestOperation(op, serDes) : null;</span>
+<span class="fc" id="L279">        var op = storage.getOperationByName(name);</span>
+<span class="pc bpc" id="L280" title="1 of 2 branches missed.">        return op != null ? new TestOperation(op, serDes) : null;</span>
     }
 
     /** Get callback ID for a named callback operation. */
     public String getCallbackId(String operationName) {
-<span class="fc" id="L283">        return storage.getCallbackId(operationName);</span>
+<span class="fc" id="L285">        return storage.getCallbackId(operationName);</span>
     }
 
     /** Complete a callback with success result. */
     public void completeCallback(String callbackId, String result) {
-<span class="fc" id="L288">        storage.completeCallback(callbackId, OperationResult.succeeded(result));</span>
-<span class="fc" id="L289">    }</span>
+<span class="fc" id="L290">        storage.completeCallback(callbackId, OperationResult.succeeded(result));</span>
+<span class="fc" id="L291">    }</span>
 
     /** Fail a callback with error. */
     public void failCallback(String callbackId, ErrorObject error) {
-<span class="fc" id="L293">        storage.completeCallback(callbackId, OperationResult.failed(error));</span>
-<span class="fc" id="L294">    }</span>
+<span class="fc" id="L295">        storage.completeCallback(callbackId, OperationResult.failed(error));</span>
+<span class="fc" id="L296">    }</span>
 
     /** Timeout a callback. */
     public void timeoutCallback(String callbackId) {
-<span class="fc" id="L298">        storage.completeCallback(callbackId, OperationResult.timedout());</span>
-<span class="fc" id="L299">    }</span>
+<span class="fc" id="L300">        storage.completeCallback(callbackId, OperationResult.timedout());</span>
+<span class="fc" id="L301">    }</span>
 
     /** Advances all pending operations, simulating time passing for retries and waits. */
     public void advanceTime() {
-<span class="fc" id="L303">        storage.advanceTime();</span>
-<span class="fc" id="L304">    }</span>
+<span class="fc" id="L305">        storage.advanceTime();</span>
+<span class="fc" id="L306">    }</span>
 
     /** Completes a chained invoke operation with a successful result. */
     public void completeChainedInvoke(String name, String result) {
-<span class="fc" id="L308">        storage.completeChainedInvoke(name, OperationResult.succeeded(result));</span>
-<span class="fc" id="L309">    }</span>
+<span class="fc" id="L310">        storage.completeChainedInvoke(name, OperationResult.succeeded(result));</span>
+<span class="fc" id="L311">    }</span>
 
     /** Marks a chained invoke operation as timed out. */
     public void timeoutChainedInvoke(String name) {
-<span class="fc" id="L313">        storage.completeChainedInvoke(name, OperationResult.timedout());</span>
-<span class="fc" id="L314">    }</span>
+<span class="fc" id="L315">        storage.completeChainedInvoke(name, OperationResult.timedout());</span>
+<span class="fc" id="L316">    }</span>
 
     /** Fails a chained invoke operation with the given error. */
     public void failChainedInvoke(String name, ErrorObject error) {
-<span class="fc" id="L318">        storage.completeChainedInvoke(name, OperationResult.failed(error));</span>
-<span class="fc" id="L319">    }</span>
+<span class="fc" id="L320">        storage.completeChainedInvoke(name, OperationResult.failed(error));</span>
+<span class="fc" id="L321">    }</span>
 
     /** Stops a chained invoke operation with the given error. */
     public void stopChainedInvoke(String name, ErrorObject error) {
-<span class="fc" id="L323">        storage.completeChainedInvoke(name, OperationResult.stopped(error));</span>
-<span class="fc" id="L324">    }</span>
+<span class="fc" id="L325">        storage.completeChainedInvoke(name, OperationResult.stopped(error));</span>
+<span class="fc" id="L326">    }</span>
 
     private DurableExecutionInput createDurableInput(I input) {
-<span class="fc" id="L327">        var executionName = UUID.randomUUID().toString();</span>
-<span class="fc" id="L328">        var invocationId = UUID.randomUUID().toString();</span>
-<span class="fc" id="L329">        var executionArn = String.format(</span>
+<span class="fc" id="L329">        var executionName = UUID.randomUUID().toString();</span>
+<span class="fc" id="L330">        var invocationId = UUID.randomUUID().toString();</span>
+<span class="fc" id="L331">        var executionArn = String.format(</span>
                 &quot;arn:aws:lambda:us-east-1:123456789012:function:test:$LATEST/durable-execution/%s/%s&quot;,
                 executionName, invocationId);
-<span class="fc" id="L332">        var inputJson = serDes.serialize(input);</span>
-<span class="fc" id="L333">        var executionOp = Operation.builder()</span>
-<span class="fc" id="L334">                .id(invocationId)</span>
-<span class="fc" id="L335">                .name(executionName)</span>
-<span class="fc" id="L336">                .type(OperationType.EXECUTION)</span>
-<span class="fc" id="L337">                .status(OperationStatus.STARTED)</span>
-<span class="fc" id="L338">                .executionDetails(</span>
-<span class="fc" id="L339">                        ExecutionDetails.builder().inputPayload(inputJson).build())</span>
-<span class="fc" id="L340">                .build();</span>
+<span class="fc" id="L334">        var inputJson = serDes.serialize(input);</span>
+<span class="fc" id="L335">        var executionOp = Operation.builder()</span>
+<span class="fc" id="L336">                .id(invocationId)</span>
+<span class="fc" id="L337">                .name(executionName)</span>
+<span class="fc" id="L338">                .type(OperationType.EXECUTION)</span>
+<span class="fc" id="L339">                .status(OperationStatus.STARTED)</span>
+<span class="fc" id="L340">                .executionDetails(</span>
+<span class="fc" id="L341">                        ExecutionDetails.builder().inputPayload(inputJson).build())</span>
+<span class="fc" id="L342">                .build();</span>
 
         // Load previous operations and include them in InitialExecutionState
-<span class="fc" id="L343">        var existingOps = storage.getAllOperations();</span>
-<span class="fc" id="L344">        var allOps = new ArrayList&lt;&gt;(List.of(executionOp));</span>
-<span class="fc" id="L345">        allOps.addAll(existingOps);</span>
+<span class="fc" id="L345">        var existingOps = storage.getAllOperations();</span>
+<span class="fc" id="L346">        var allOps = new ArrayList&lt;&gt;(List.of(executionOp));</span>
+<span class="fc" id="L347">        allOps.addAll(existingOps);</span>
 
-<span class="fc" id="L347">        return new DurableExecutionInput(</span>
+<span class="fc" id="L349">        return new DurableExecutionInput(</span>
                 executionArn,
-<span class="fc" id="L349">                UUID.randomUUID().toString(),</span>
-<span class="fc" id="L350">                CheckpointUpdatedExecutionState.builder().operations(allOps).build());</span>
+<span class="fc" id="L351">                UUID.randomUUID().toString(),</span>
+<span class="fc" id="L352">                CheckpointUpdatedExecutionState.builder().operations(allOps).build());</span>
     }
 
     private Context mockLambdaContext() {
-<span class="fc" id="L354">        return null; // Minimal - tests don't need real Lambda context</span>
+<span class="fc" id="L356">        return null; // Minimal - tests don't need real Lambda context</span>
     }
 }
 </pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>PluginInfoConverter.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">AWS Lambda Durable Execution SDK Coverage Report</a> &gt; <a href="../index.html" class="el_bundle">aws-durable-execution-sdk-java</a> &gt; <a href="index.source.html" class="el_package">software.amazon.lambda.durable.plugin</a> &gt; <span class="el_source">PluginInfoConverter.java</span></div><h1>PluginInfoConverter.java</h1><pre class="source lang-java linenums">// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+package software.amazon.lambda.durable.plugin;
+
+import java.time.Instant;
+import software.amazon.awssdk.services.lambda.model.Operation;
+import software.amazon.lambda.durable.model.OperationIdentifier;
+
+/**
+ * Utility methods for converting SDK internal types to plugin info records.
+ *
+ * @deprecated This is a preview API that is experimental and may be changed or removed in future releases.
+ */
+@Deprecated
+public final class PluginInfoConverter {
+
+    private PluginInfoConverter() {}
+
+    /**
+     * Converts an SDK {@link Operation} to an {@link OperationInfo} using an {@link OperationIdentifier}.
+     *
+     * @param operation the SDK operation (may be null for first-start scenarios)
+     * @param identifier the operation identifier containing id, name, type, and subType
+     * @param parentId the parent operation ID (may be null for root operations)
+     * @return an OperationInfo record
+     */
+    public static OperationInfo toOperationInfo(Operation operation, OperationIdentifier identifier, String parentId) {
+<span class="fc" id="L28">        return new OperationInfo(</span>
+<span class="fc" id="L29">                identifier.operationId(),</span>
+<span class="fc" id="L30">                identifier.name(),</span>
+<span class="pc bpc" id="L31" title="1 of 2 branches missed.">                identifier.operationType() != null ? identifier.operationType().toString() : null,</span>
+<span class="pc bpc" id="L32" title="1 of 2 branches missed.">                identifier.subType() != null ? identifier.subType().getValue() : null,</span>
+                parentId,
+<span class="fc bfc" id="L34" title="All 2 branches covered.">                operation != null ? operation.startTimestamp() : Instant.now(),</span>
+<span class="fc bfc" id="L35" title="All 2 branches covered.">                operation != null ? operation.endTimestamp() : null);</span>
+    }
+
+    /**
+     * Creates an {@link OperationEndInfo} from an SDK {@link Operation}, an {@link OperationIdentifier}, and an
+     * optional error.
+     *
+     * @param operation the completed SDK operation
+     * @param identifier the operation identifier containing id, name, type, and subType
+     * @param parentId the parent operation ID (may be null)
+     * @param error the error if the operation failed (may be null)
+     * @return an OperationEndInfo record
+     */
+    public static OperationEndInfo toOperationEndInfo(
+            Operation operation, OperationIdentifier identifier, String parentId, Throwable error) {
+<span class="fc" id="L50">        return new OperationEndInfo(</span>
+<span class="fc" id="L51">                identifier.operationId(),</span>
+<span class="fc" id="L52">                identifier.name(),</span>
+<span class="pc bpc" id="L53" title="1 of 2 branches missed.">                identifier.operationType() != null ? identifier.operationType().toString() : null,</span>
+<span class="pc bpc" id="L54" title="1 of 2 branches missed.">                identifier.subType() != null ? identifier.subType().getValue() : null,</span>
+                parentId,
+<span class="pc bpc" id="L56" title="1 of 2 branches missed.">                operation != null ? operation.startTimestamp() : null,</span>
+<span class="pc bpc" id="L57" title="1 of 2 branches missed.">                operation != null ? operation.endTimestamp() : null,</span>
+                error);
+    }
+
+    /**
+     * Creates a {@link UserFunctionStartInfo} for when a user function starts executing.
+     *
+     * @param identifier the operation identifier containing id, name, type, and subType
+     * @param parentId the parent operation ID (may be null)
+     * @param isReplay true if the user function is called during replay (context operations)
+     * @param attempt the 1-based attempt number (null for context operations)
+     * @return a UserFunctionStartInfo record
+     */
+    public static UserFunctionStartInfo toUserFunctionStartInfo(
+            OperationIdentifier identifier, String parentId, boolean isReplayingChildren, Integer attempt) {
+<span class="fc" id="L72">        return new UserFunctionStartInfo(</span>
+<span class="fc" id="L73">                identifier.operationId(),</span>
+<span class="fc" id="L74">                identifier.name(),</span>
+<span class="pc bpc" id="L75" title="1 of 2 branches missed.">                identifier.operationType() != null ? identifier.operationType().toString() : null,</span>
+<span class="pc bpc" id="L76" title="1 of 2 branches missed.">                identifier.subType() != null ? identifier.subType().getValue() : null,</span>
+                parentId,
+<span class="fc" id="L78">                Instant.now(),</span>
+                isReplayingChildren,
+                attempt);
+    }
+
+    /**
+     * Creates a {@link UserFunctionEndInfo} from a start info and outcome.
+     *
+     * @param startInfo the start info from when the function began
+     * @param succeeded true if the function completed without error
+     * @param error the error if the function failed (may be null)
+     * @return a UserFunctionEndInfo record
+     */
+    public static UserFunctionEndInfo toUserFunctionEndInfo(
+            UserFunctionStartInfo startInfo, boolean succeeded, Throwable error) {
+<span class="fc" id="L93">        return new UserFunctionEndInfo(</span>
+<span class="fc" id="L94">                startInfo.id(),</span>
+<span class="fc" id="L95">                startInfo.name(),</span>
+<span class="fc" id="L96">                startInfo.type(),</span>
+<span class="fc" id="L97">                startInfo.subType(),</span>
+<span class="fc" id="L98">                startInfo.parentId(),</span>
+<span class="fc" id="L99">                startInfo.startTimestamp(),</span>
+<span class="fc" id="L100">                Instant.now(),</span>
+<span class="fc" id="L101">                startInfo.isReplayingChildren(),</span>
+<span class="fc" id="L102">                startInfo.attempt(),</span>
+                succeeded,
+                error);
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

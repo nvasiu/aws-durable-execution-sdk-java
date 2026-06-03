@@ -119,7 +119,7 @@ public class StepOperation&lt;T&gt; extends SerializableDurableOperation&lt;T&gt
 <span class="fc" id="L119">        };</span>
 
         // Execute user provided step code in user-configured executor
-<span class="fc" id="L122">        runUserHandler(userHandler, ThreadType.STEP);</span>
+<span class="fc" id="L122">        runUserHandler(userHandler, ThreadType.STEP, attempt);</span>
 <span class="fc" id="L123">    }</span>
 
     private void checkpointStarted() {
