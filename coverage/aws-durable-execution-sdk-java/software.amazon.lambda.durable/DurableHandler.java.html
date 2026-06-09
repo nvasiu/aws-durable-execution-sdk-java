@@ -36,6 +36,17 @@ public abstract class DurableHandler&lt;I, O&gt; implements RequestStreamHandler
 <span class="fc" id="L36">    }</span>
 
     /**
+     * Constructs a handler with an explicitly provided input type. Use this when the input type cannot be inferred from
+     * the generic superclass, such as when extending {@link DurableHandler} indirectly through an intermediate class.
+     *
+     * @param inputType the token capturing the handler's input type
+     */
+<span class="fc" id="L44">    protected DurableHandler(TypeToken&lt;I&gt; inputType) {</span>
+<span class="fc" id="L45">        this.inputType = inputType;</span>
+<span class="fc" id="L46">        this.config = createConfiguration();</span>
+<span class="fc" id="L47">    }</span>
+
+    /**
      * Gets the configuration used by this handler. This allows test frameworks and other tools to access the handler's
      * configuration for testing purposes.
      *
@@ -44,7 +55,7 @@ public abstract class DurableHandler&lt;I, O&gt; implements RequestStreamHandler
      * @return The DurableConfig instance used by this handler
      */
     public DurableConfig getConfiguration() {
-<span class="fc" id="L47">        return config;</span>
+<span class="fc" id="L58">        return config;</span>
     }
 
     /**
@@ -113,7 +124,7 @@ public abstract class DurableHandler&lt;I, O&gt; implements RequestStreamHandler
      * @return DurableConfig with desired configuration
      */
     protected DurableConfig createConfiguration() {
-<span class="fc" id="L116">        return DurableConfig.defaultConfig();</span>
+<span class="fc" id="L127">        return DurableConfig.defaultConfig();</span>
     }
 
     /**
@@ -127,12 +138,17 @@ public abstract class DurableHandler&lt;I, O&gt; implements RequestStreamHandler
     @Override
     public final void handleRequest(InputStream inputStream, OutputStream outputStream, Context context)
             throws IOException {
-<span class="nc" id="L130">        var inputString = new String(inputStream.readAllBytes());</span>
-<span class="nc" id="L131">        logger.debug(&quot;Raw input from durable handler: {}&quot;, inputString);</span>
-<span class="nc" id="L132">        var input = serDes.deserialize(inputString, TypeToken.get(DurableExecutionInput.class));</span>
-<span class="nc" id="L133">        var output = DurableExecutor.execute(input, context, inputType, this::handleRequest, config);</span>
-<span class="nc" id="L134">        outputStream.write(serDes.serialize(output).getBytes());</span>
-<span class="nc" id="L135">    }</span>
+<span class="fc" id="L141">        var inputString = new String(inputStream.readAllBytes());</span>
+<span class="fc" id="L142">        logger.debug(&quot;Raw input from durable handler: {}&quot;, inputString);</span>
+<span class="fc" id="L143">        var input = serDes.deserialize(inputString, TypeToken.get(DurableExecutionInput.class));</span>
+        // Durable function inputs must contain DurableExecutionArn and CheckpointToken
+<span class="pc bpc" id="L145" title="3 of 4 branches missed.">        if (input.durableExecutionArn() == null || input.checkpointToken() == null) {</span>
+<span class="fc" id="L146">            throw new IllegalStateException(</span>
+                    &quot;Unexpected payload provided to start the durable execution. DurableConfig must be set in Lambda function configuration.&quot;);
+        }
+<span class="nc" id="L149">        var output = DurableExecutor.execute(input, context, inputType, this::handleRequest, config);</span>
+<span class="nc" id="L150">        outputStream.write(serDes.serialize(output).getBytes());</span>
+<span class="nc" id="L151">    }</span>
 
     /**
      * Handle the durable execution.
@@ -143,4 +159,4 @@ public abstract class DurableHandler&lt;I, O&gt; implements RequestStreamHandler
      */
     public abstract O handleRequest(I input, DurableContext context);
 }
-</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

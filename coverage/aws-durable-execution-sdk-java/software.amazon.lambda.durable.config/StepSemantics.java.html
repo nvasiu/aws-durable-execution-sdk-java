@@ -15,10 +15,15 @@ package software.amazon.lambda.durable.config;
 <span class="fc" id="L15">    AT_LEAST_ONCE_PER_RETRY,</span>
 
     /**
-     * At-most-once delivery per retry attempt. The step will not be re-executed if interrupted. START checkpoint is
-     * awaited before user code runs. If interrupted, throws
-     * {@link software.amazon.lambda.durable.exception.StepInterruptedException}.
+     * At-most-once delivery per retry attempt. START checkpoint is awaited before user code runs. If interrupted,
+     * throws {@link software.amazon.lambda.durable.exception.StepInterruptedException}.
+     *
+     * &lt;p&gt;When used with {@link StepConfig.Builder#semantics(StepSemantics)}: interrupted steps are NOT retried
+     * (incorrect behavior, kept for backward compatibility).
+     *
+     * &lt;p&gt;When used with {@link StepConfig.Builder#semanticsPerRetry(StepSemantics)}: interrupted steps are retried
+     * according to the retry strategy (correct behavior).
      */
-<span class="fc" id="L22">    AT_MOST_ONCE_PER_RETRY</span>
+<span class="fc" id="L27">    AT_MOST_ONCE_PER_RETRY</span>
 }
-</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>

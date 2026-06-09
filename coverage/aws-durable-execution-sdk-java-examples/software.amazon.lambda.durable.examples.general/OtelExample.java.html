@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>OtelExample.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">AWS Lambda Durable Execution SDK Coverage Report</a> &gt; <a href="../index.html" class="el_bundle">aws-durable-execution-sdk-java-examples</a> &gt; <a href="index.source.html" class="el_package">software.amazon.lambda.durable.examples.general</a> &gt; <span class="el_source">OtelExample.java</span></div><h1>OtelExample.java</h1><pre class="source lang-java linenums">// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+package software.amazon.lambda.durable.examples.general;
+
+import io.opentelemetry.exporter.logging.LoggingSpanExporter;
+import io.opentelemetry.sdk.trace.SdkTracerProvider;
+import io.opentelemetry.sdk.trace.export.SimpleSpanProcessor;
+import software.amazon.lambda.durable.DurableConfig;
+import software.amazon.lambda.durable.DurableContext;
+import software.amazon.lambda.durable.DurableHandler;
+import software.amazon.lambda.durable.examples.types.GreetingRequest;
+import software.amazon.lambda.durable.otel.OpenTelemetryDurablePlugin;
+
+/**
+ * Example demonstrating OpenTelemetry instrumentation with the Durable Execution SDK.
+ *
+ * &lt;p&gt;This handler configures the OTel plugin with:
+ *
+ * &lt;ul&gt;
+ *   &lt;li&gt;Deterministic trace/span IDs (all invocations of the same execution share one trace)
+ *   &lt;li&gt;MDC log enrichment (trace_id and span_id in every log line)
+ *   &lt;li&gt;Logging exporter (spans printed to stdout → CloudWatch Logs)
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;In production, replace {@code LoggingSpanExporter} with {@code OtlpGrpcSpanExporter} to send spans to an OTLP
+ * collector (X-Ray, Datadog, etc.).
+ *
+ * &lt;p&gt;Expected trace structure:
+ *
+ * &lt;pre&gt;
+ * durable.invocation
+ * ├── durable.step:create-greeting [attempt 1]
+ * ├── durable.step:create-greeting (operation, backfilled)
+ * ├── durable.step:transform [attempt 1]
+ * └── durable.step:transform (operation, backfilled)
+ * &lt;/pre&gt;
+ */
+<span class="fc" id="L38">public class OtelExample extends DurableHandler&lt;GreetingRequest, String&gt; {</span>
+
+    @Override
+    protected DurableConfig createConfiguration() {
+<span class="fc" id="L42">        var otelPlugin = new OpenTelemetryDurablePlugin(</span>
+<span class="fc" id="L43">                SdkTracerProvider.builder().addSpanProcessor(SimpleSpanProcessor.create(LoggingSpanExporter.create())));</span>
+
+<span class="fc" id="L45">        return DurableConfig.builder().withPlugins(otelPlugin).build();</span>
+    }
+
+    @Override
+    public String handleRequest(GreetingRequest input, DurableContext context) {
+        // Log with MDC — trace_id and span_id will be in the JSON output
+<span class="fc" id="L51">        context.getLogger().info(&quot;Starting OTel example for {}&quot;, input.getName());</span>
+
+<span class="fc" id="L53">        var greeting = context.step(&quot;create-greeting&quot;, String.class, stepCtx -&gt; {</span>
+<span class="fc" id="L54">            context.getLogger().info(&quot;Inside step — this log has trace context in MDC&quot;);</span>
+<span class="fc" id="L55">            return &quot;Hello, &quot; + input.getName();</span>
+        });
+
+<span class="fc" id="L58">        var result = context.step(&quot;transform&quot;, String.class, stepCtx -&gt; greeting.toUpperCase() + &quot;!&quot;);</span>
+
+<span class="fc" id="L60">        context.getLogger().info(&quot;OTel example complete: {}&quot;, result);</span>
+<span class="fc" id="L61">        return result;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.15.202606040825</span></div></body></html>
