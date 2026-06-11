@@ -159,6 +159,96 @@ class OtelPluginIntegrationTest {
     }
 
     @Test
+    void waitCompletedDuringSuspension_producesOperationSpan() {
+        var runner = LocalDurableTestRunner.create(
+                String.class,
+                (input, ctx) -> {
+                    ctx.step("before-wait", String.class, stepCtx -> "pre");
+                    ctx.wait("pause", Duration.ofMinutes(1));
+                    ctx.step("after-wait", String.class, stepCtx -> "post");
+                    return "done";
+                },
+                otelConfig);
+
+        // First invocation: step completes, wait starts, suspend
+        var result1 = runner.run("input");
+        assertEquals(ExecutionStatus.PENDING, result1.getStatus());
+
+        // The wait operation span should be open (ended with PENDING status at invocation end)
+        var spansAfterFirst = spanExporter.getFinishedSpanItems();
+        var waitSpansAfterFirst = spansAfterFirst.stream()
+                .filter(s -> s.getName().equals("durable.wait:pause"))
+                .toList();
+        assertEquals(1, waitSpansAfterFirst.size(), "Wait span should exist after first invocation (ended as PENDING)");
+
+        // Advance time (wait completes externally) and resume
+        runner.advanceTime();
+        var result2 = runner.run("input");
+        assertEquals(ExecutionStatus.SUCCEEDED, result2.getStatus());
+
+        // After second invocation, the wait should have a second operation span
+        // (fired by onOperationEnd via updatedOperationIds) showing it completed
+        var allSpans = spanExporter.getFinishedSpanItems();
+        var waitSpansTotal = allSpans.stream()
+                .filter(s -> s.getName().equals("durable.wait:pause"))
+                .toList();
+        assertEquals(
+                2,
+                waitSpansTotal.size(),
+                "Wait should have 2 spans: one PENDING from first invocation, one completed from second. Got: "
+                        + allSpans.stream()
+                                .map(SpanData::getName)
+                                .filter(n -> n.contains("pause"))
+                                .toList());
+    }
+
+    @Test
+    void invokeFailedDuringSuspension_producesErrorSpan() {
+        var runner = LocalDurableTestRunner.create(
+                String.class,
+                (input, ctx) -> {
+                    try {
+                        ctx.invoke("call-target", "target-fn", "{}", String.class);
+                    } catch (Exception e) {
+                        // expected failure
+                    }
+                    return "handled";
+                },
+                otelConfig);
+
+        // First invocation: invoke starts, suspends waiting for target
+        var result1 = runner.run("input");
+        assertEquals(ExecutionStatus.PENDING, result1.getStatus());
+
+        // Target fails while Lambda is frozen
+        runner.failChainedInvoke(
+                "call-target",
+                software.amazon.awssdk.services.lambda.model.ErrorObject.builder()
+                        .errorType("TargetError")
+                        .errorMessage("target function failed")
+                        .build());
+
+        // Resume
+        var result2 = runner.run("input");
+        assertEquals(ExecutionStatus.SUCCEEDED, result2.getStatus());
+
+        // The invoke operation span from the second invocation should have ERROR status
+        var allSpans = spanExporter.getFinishedSpanItems();
+        var invokeSpans = allSpans.stream()
+                .filter(s -> s.getName().contains("call-target"))
+                .toList();
+        assertTrue(invokeSpans.size() >= 2, "Should have at least 2 invoke spans (one PENDING, one ended with error)");
+
+        // The span from the second invocation should be marked as error
+        var errorSpan = invokeSpans.stream()
+                .filter(s -> s.getStatus().getStatusCode() == io.opentelemetry.api.trace.StatusCode.ERROR)
+                .findFirst();
+        assertTrue(
+                errorSpan.isPresent(),
+                "Should have an invoke span with ERROR status when invoke fails during suspension");
+    }
+
+    @Test
     void childContext_producesNestedSpans() {
         var runner = LocalDurableTestRunner.create(
                 String.class,

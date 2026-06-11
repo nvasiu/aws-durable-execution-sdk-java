@@ -10,6 +10,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.services.lambda.model.ErrorObject;
 import software.amazon.lambda.durable.config.StepConfig;
 import software.amazon.lambda.durable.model.ExecutionStatus;
 import software.amazon.lambda.durable.model.WaitForConditionResult;
@@ -39,7 +40,7 @@ class PluginIntegrationTest {
         // Verify invocation hooks fired
         assertEquals(1, plugin.invocationStarts.size());
         assertTrue(plugin.invocationStarts.get(0).isFirstInvocation());
-        assertNotNull(plugin.invocationStarts.get(0).executionArn());
+        assertNotNull(plugin.invocationStarts.get(0).durableExecutionArn());
 
         assertEquals(1, plugin.invocationEnds.size());
         assertEquals(InvocationStatus.SUCCEEDED, plugin.invocationEnds.get(0).invocationStatus());
@@ -173,6 +174,160 @@ class PluginIntegrationTest {
                 .filter(info -> "step1".equals(info.name()))
                 .count();
         assertEquals(1, step1EndCount, "step1 onOperationEnd should fire only once (not on replay)");
+    }
+
+    @Test
+    void plugin_operationEnd_firedForOperationCompletedDuringSuspension() {
+        var plugin = new RecordingPlugin();
+        var config = DurableConfig.builder().withPlugins(plugin).build();
+
+        var runner = LocalDurableTestRunner.create(
+                String.class,
+                (input, context) -> {
+                    context.step("step1", String.class, stepCtx -> "done");
+                    context.wait("pause", Duration.ofMinutes(1));
+                    context.step("step2", String.class, stepCtx -> "final");
+                    return "complete";
+                },
+                config);
+
+        // First invocation: step1 completes, then suspends at wait
+        var result1 = runner.run("input");
+        assertEquals(ExecutionStatus.PENDING, result1.getStatus());
+
+        // Advance time (wait completes externally while Lambda was frozen)
+        runner.advanceTime();
+
+        // Clear plugin state to only track second invocation
+        plugin.operationEnds.clear();
+        plugin.operationStarts.clear();
+
+        var result2 = runner.run("input");
+        assertEquals(ExecutionStatus.SUCCEEDED, result2.getStatus());
+
+        // onOperationEnd for "pause" should fire during the second invocation
+        // because the wait completed during suspension (it's in updatedOperationIds)
+        long pauseEndCount = plugin.operationEnds.stream()
+                .filter(info -> "pause".equals(info.name()))
+                .count();
+        assertEquals(1, pauseEndCount, "wait operation onOperationEnd should fire when it completes during suspension");
+    }
+
+    @Test
+    void plugin_operationEnd_firedOnceForStepCompletingInCurrentInvocation() {
+        var plugin = new RecordingPlugin();
+        var config = DurableConfig.builder().withPlugins(plugin).build();
+
+        var runner = LocalDurableTestRunner.create(
+                String.class,
+                (input, context) -> {
+                    context.step("step1", String.class, stepCtx -> "done");
+                    return "complete";
+                },
+                config);
+
+        // Single invocation: step1 completes within this invocation
+        var result = runner.runUntilComplete("input");
+        assertEquals(ExecutionStatus.SUCCEEDED, result.getStatus());
+
+        long step1EndCount = plugin.operationEnds.stream()
+                .filter(info -> "step1".equals(info.name()))
+                .count();
+        assertEquals(1, step1EndCount, "step1 onOperationEnd should fire exactly once");
+    }
+
+    @Test
+    void plugin_operationEnd_includesError_whenInvokeFailsDuringSuspension() {
+        var plugin = new RecordingPlugin();
+        var config = DurableConfig.builder().withPlugins(plugin).build();
+
+        var runner = LocalDurableTestRunner.create(
+                String.class,
+                (input, context) -> {
+                    try {
+                        context.invoke("call-target", "target-fn", "{}", String.class);
+                    } catch (Exception e) {
+                        // expected
+                    }
+                    return "done";
+                },
+                config);
+
+        // First invocation: invoke starts, suspends waiting for target
+        var result1 = runner.run("input");
+        assertEquals(ExecutionStatus.PENDING, result1.getStatus());
+
+        // Target fails while Lambda is frozen
+        runner.failChainedInvoke(
+                "call-target",
+                ErrorObject.builder()
+                        .errorType("TargetError")
+                        .errorMessage("target function failed")
+                        .build());
+
+        // Clear plugin state to only track second invocation
+        plugin.operationEnds.clear();
+
+        var result2 = runner.run("input");
+        assertEquals(ExecutionStatus.SUCCEEDED, result2.getStatus());
+
+        // onOperationEnd for "call-target" should fire with error info
+        var invokeEnd = plugin.operationEnds.stream()
+                .filter(info -> "call-target".equals(info.name()))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(invokeEnd, "onOperationEnd should fire for failed invoke during suspension");
+        assertNotNull(invokeEnd.error(), "error should be propagated for failed invoke");
+        assertEquals("target function failed", invokeEnd.error().getMessage());
+    }
+
+    @Test
+    void plugin_operationEnd_includesError_whenStepFailsViaCheckpoint() {
+        var plugin = new RecordingPlugin();
+        var config = DurableConfig.builder().withPlugins(plugin).build();
+
+        var runner = LocalDurableTestRunner.create(
+                String.class,
+                (input, context) -> context.step(
+                        "failing-step",
+                        String.class,
+                        stepCtx -> {
+                            throw new RuntimeException("step exploded");
+                        },
+                        StepConfig.builder()
+                                .retryStrategy(RetryStrategies.Presets.NO_RETRY)
+                                .build()),
+                config);
+
+        var result = runner.run("input");
+        assertEquals(ExecutionStatus.FAILED, result.getStatus());
+
+        // onOperationEnd for "failing-step" should fire with error info
+        var stepEnd = plugin.operationEnds.stream()
+                .filter(info -> "failing-step".equals(info.name()))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(stepEnd, "onOperationEnd should fire for failed step");
+        assertNotNull(stepEnd.error(), "error should be propagated for failed step");
+        assertTrue(stepEnd.error().getMessage().contains("step exploded"));
+    }
+
+    @Test
+    void plugin_operationEnd_noError_whenOperationSucceeds() {
+        var plugin = new RecordingPlugin();
+        var config = DurableConfig.builder().withPlugins(plugin).build();
+
+        var runner = LocalDurableTestRunner.create(
+                String.class, (input, context) -> context.step("ok-step", String.class, stepCtx -> "success"), config);
+
+        runner.runUntilComplete("input");
+
+        var stepEnd = plugin.operationEnds.stream()
+                .filter(info -> "ok-step".equals(info.name()))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(stepEnd, "onOperationEnd should fire for successful step");
+        assertNull(stepEnd.error(), "error should be null for successful step");
     }
 
     // ─── User function hooks ─────────────────────────────────────────────
