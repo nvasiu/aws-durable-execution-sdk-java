@@ -1,7 +1,8 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
-package software.amazon.lambda.durable.model;
+package software.amazon.lambda.durable.dmap;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
@@ -10,6 +11,7 @@ public record ReaderPage<I, S>(List<I> items, S nextState) {
 
     /** Applies a defensive copy and defaults. */
     public ReaderPage {
-        items = items != null ? List.copyOf(items) : Collections.emptyList();
+        // A null item is valid and is sent as the JSON literal null. List.copyOf rejects null elements.
+        items = items != null ? Collections.unmodifiableList(new ArrayList<>(items)) : Collections.emptyList();
     }
 }

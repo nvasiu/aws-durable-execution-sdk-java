@@ -9,20 +9,8 @@ public class DistributedMapProcessor {
 
     /** Per-batch response mode reported by the processor. */
     public enum ResponseMode {
-        REPORT_BATCH_OUTCOME(null),
-        REPORT_FAILED_ITEMS("REPORT_BATCH_ITEM_FAILURES"),
-        REPORT_ITEM_RESULTS("REPORT_BATCH_ITEM_RESULTS");
-
-        private final String value;
-
-        ResponseMode(String value) {
-            this.value = value;
-        }
-
-        /** Returns the wire functionResponseTypes value, or null for the batch-outcome mode. */
-        public String getValue() {
-            return value;
-        }
+        BATCH,
+        ITEM_OUTCOMES
     }
 
     private static final int MIN_BATCH_SIZE = 1;
@@ -32,7 +20,7 @@ public class DistributedMapProcessor {
     private final String functionName;
     private final ResponseMode responseMode;
     private final Integer batchSize;
-    private final ProcessorRetryConfig retryConfig;
+    private final DistributedMapProcessorRetryConfig retry;
     private final String durableExecutionNamePrefix;
 
     private DistributedMapProcessor(Builder builder) {
@@ -49,7 +37,7 @@ public class DistributedMapProcessor {
         this.functionName = builder.functionName;
         this.responseMode = builder.responseMode;
         this.batchSize = builder.batchSize;
-        this.retryConfig = builder.retryConfig;
+        this.retry = builder.retry;
         this.durableExecutionNamePrefix = builder.durableExecutionNamePrefix;
     }
 
@@ -65,8 +53,9 @@ public class DistributedMapProcessor {
         return batchSize;
     }
 
-    public ProcessorRetryConfig retryConfig() {
-        return retryConfig;
+    /** Returns the retry settings, or null for the service defaults. */
+    public DistributedMapProcessorRetryConfig retry() {
+        return retry;
     }
 
     public String durableExecutionNamePrefix() {
@@ -75,17 +64,15 @@ public class DistributedMapProcessor {
 
     /** Processor that reports a single pass/fail outcome for the whole batch, with no per-item results. */
     public static Builder reportBatchOutcome(String functionName) {
-        return new Builder(functionName, ResponseMode.REPORT_BATCH_OUTCOME);
+        return new Builder(functionName, ResponseMode.BATCH);
     }
 
-    /** Processor that reports the ids of failed items, with all others marked succeeded. */
-    public static Builder reportFailedItems(String functionName) {
-        return new Builder(functionName, ResponseMode.REPORT_FAILED_ITEMS);
-    }
-
-    /** Processor that reports the results (output or error) for every item. */
-    public static Builder reportItemResults(String functionName) {
-        return new Builder(functionName, ResponseMode.REPORT_ITEM_RESULTS);
+    /**
+     * Processor that may report a failure or an output for each item. Every item it does not list succeeds with no
+     * output.
+     */
+    public static Builder reportItemOutcomes(String functionName) {
+        return new Builder(functionName, ResponseMode.ITEM_OUTCOMES);
     }
 
     /** Builder for DistributedMapProcessor. */
@@ -93,7 +80,7 @@ public class DistributedMapProcessor {
         private final String functionName;
         private final ResponseMode responseMode;
         private Integer batchSize;
-        private ProcessorRetryConfig retryConfig;
+        private DistributedMapProcessorRetryConfig retry;
         private String durableExecutionNamePrefix;
 
         private Builder(String functionName, ResponseMode responseMode) {
@@ -106,8 +93,14 @@ public class DistributedMapProcessor {
             return this;
         }
 
-        public Builder retryConfig(ProcessorRetryConfig retryConfig) {
-            this.retryConfig = retryConfig;
+        /**
+         * Sets the per-item retry policy. Omit it to take the service defaults of 2 attempts within 6 hours.
+         *
+         * @param retry the retry settings
+         * @return this builder
+         */
+        public Builder retry(DistributedMapProcessorRetryConfig retry) {
+            this.retry = retry;
             return this;
         }
 
