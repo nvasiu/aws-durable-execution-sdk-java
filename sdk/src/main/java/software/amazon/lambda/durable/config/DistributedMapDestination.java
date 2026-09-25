@@ -4,20 +4,34 @@ package software.amazon.lambda.durable.config;
 
 import software.amazon.lambda.durable.util.DistributedMapValidation;
 
-/** Destination factories for a distributed map run. */
-public final class DistributedMapDestination {
-    private DistributedMapDestination() {}
+/** Destination routing for distributed map run results. */
+public record DistributedMapDestination(Success onSuccess, Failure onFailure) {
+
+    /** Routes only succeeded item records. */
+    public static DistributedMapDestination of(Success onSuccess) {
+        return new DistributedMapDestination(onSuccess, null);
+    }
+
+    /** Routes only failed item records. */
+    public static DistributedMapDestination of(Failure onFailure) {
+        return new DistributedMapDestination(null, onFailure);
+    }
+
+    /** Routes both succeeded and failed item records. */
+    public static DistributedMapDestination of(Success onSuccess, Failure onFailure) {
+        return new DistributedMapDestination(onSuccess, onFailure);
+    }
 
     /** Route succeeded item records to an S3 prefix (defaults to include output only). */
-    public static SuccessDestination successes(String prefixUri) {
+    public static Success successes(String prefixUri) {
         return successes(prefixUri, false, true, null);
     }
 
     /** Route succeeded item records to an S3 prefix. */
-    public static SuccessDestination successes(
+    public static Success successes(
             String prefixUri, boolean includeInput, boolean includeOutput, String expectedBucketOwner) {
         var parsed = DistributedMapValidation.parseS3Uri(prefixUri);
-        return new SuccessDestination(
+        return new Success(
                 parsed.bucket(),
                 parsed.path() != null ? parsed.path() : "",
                 includeInput,
@@ -26,19 +40,43 @@ public final class DistributedMapDestination {
     }
 
     /** Route permanently-failed item records to an S3 prefix (defaults to include input and error). */
-    public static FailureDestination failures(String prefixUri) {
+    public static Failure failures(String prefixUri) {
         return failures(prefixUri, true, true, null);
     }
 
     /** Route permanently-failed item records to an S3 prefix. */
-    public static FailureDestination failures(
+    public static Failure failures(
             String prefixUri, boolean includeInput, boolean includeError, String expectedBucketOwner) {
         var parsed = DistributedMapValidation.parseS3Uri(prefixUri);
-        return new FailureDestination(
+        return new Failure(
                 parsed.bucket(),
                 parsed.path() != null ? parsed.path() : "",
                 includeInput,
                 includeError,
                 expectedBucketOwner);
+    }
+
+    /** S3 destination for succeeded distributed map items. */
+    public record Success(
+            String bucket, String prefix, boolean includeInput, boolean includeOutput, String expectedBucketOwner) {
+
+        public Success {
+            DistributedMapValidation.validateBucketOwner(expectedBucketOwner);
+            if (!includeInput && !includeOutput) {
+                throw new IllegalArgumentException("success destination must include at least one of input or output");
+            }
+        }
+    }
+
+    /** S3 destination for permanently-failed distributed map items. */
+    public record Failure(
+            String bucket, String prefix, boolean includeInput, boolean includeError, String expectedBucketOwner) {
+
+        public Failure {
+            DistributedMapValidation.validateBucketOwner(expectedBucketOwner);
+            if (!includeInput && !includeError) {
+                throw new IllegalArgumentException("failure destination must include at least one of input or error");
+            }
+        }
     }
 }

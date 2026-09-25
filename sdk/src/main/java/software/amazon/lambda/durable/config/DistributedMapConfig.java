@@ -9,8 +9,8 @@ import software.amazon.lambda.durable.serde.SerDes;
 public class DistributedMapConfig {
     private static final long MAX_TIMEOUT_SECONDS = 7776000; // 90 days
 
-    private final DistributedMapDestinationConfig destination;
-    private final DistributedMapCompletionConfig completionConfig;
+    private final DistributedMapDestination destination;
+    private final CompletionConfig completionConfig;
     private final Duration timeout;
     private final SerDes resultSerDes;
 
@@ -26,11 +26,11 @@ public class DistributedMapConfig {
         this.resultSerDes = builder.resultSerDes;
     }
 
-    public DistributedMapDestinationConfig destination() {
+    public DistributedMapDestination destination() {
         return destination;
     }
 
-    public DistributedMapCompletionConfig completionConfig() {
+    public CompletionConfig completionConfig() {
         return completionConfig;
     }
 
@@ -57,19 +57,19 @@ public class DistributedMapConfig {
 
     /** Builder for DistributedMapConfig. */
     public static class Builder {
-        private DistributedMapDestinationConfig destination;
-        private DistributedMapCompletionConfig completionConfig;
+        private DistributedMapDestination destination;
+        private CompletionConfig completionConfig;
         private Duration timeout;
         private SerDes resultSerDes;
 
         private Builder() {}
 
-        public Builder destination(DistributedMapDestinationConfig destination) {
+        public Builder destination(DistributedMapDestination destination) {
             this.destination = destination;
             return this;
         }
 
-        public Builder completionConfig(DistributedMapCompletionConfig completionConfig) {
+        public Builder completionConfig(CompletionConfig completionConfig) {
             this.completionConfig = completionConfig;
             return this;
         }
@@ -86,6 +86,48 @@ public class DistributedMapConfig {
 
         public DistributedMapConfig build() {
             return new DistributedMapConfig(this);
+        }
+    }
+
+    /** Failure-tolerance configuration for a distributed map run. */
+    public record CompletionConfig(
+            Integer toleratedFailureCount, Double toleratedFailurePercentage, Integer minimumSampleSize) {
+
+        public CompletionConfig {
+            if (toleratedFailureCount != null && toleratedFailurePercentage != null) {
+                throw new IllegalArgumentException(
+                        "toleratedFailureCount and toleratedFailurePercentage are mutually exclusive");
+            }
+            if (minimumSampleSize != null && toleratedFailurePercentage == null) {
+                throw new IllegalArgumentException("minimumSampleSize is only valid with toleratedFailurePercentage");
+            }
+            if (toleratedFailureCount != null && toleratedFailureCount < 0) {
+                throw new IllegalArgumentException(
+                        "toleratedFailureCount must be non-negative, got: " + toleratedFailureCount);
+            }
+            if (toleratedFailurePercentage != null
+                    && (toleratedFailurePercentage < 0 || toleratedFailurePercentage > 100)) {
+                throw new IllegalArgumentException(
+                        "toleratedFailurePercentage must be between 0 and 100, got: " + toleratedFailurePercentage);
+            }
+            if (minimumSampleSize != null && minimumSampleSize < 1) {
+                throw new IllegalArgumentException("minimumSampleSize must be at least 1, got: " + minimumSampleSize);
+            }
+        }
+
+        /** Abort once this many items have permanently failed. */
+        public static CompletionConfig failureCount(int count) {
+            return new CompletionConfig(count, null, null);
+        }
+
+        /** Abort once the failure rate exceeds this percentage (0 to 100). */
+        public static CompletionConfig failurePercentage(double percentage) {
+            return new CompletionConfig(null, percentage, null);
+        }
+
+        /** Abort once the failure rate exceeds this percentage (0 to 100), gated by a minimum sample size. */
+        public static CompletionConfig failurePercentage(double percentage, int minimumSampleSize) {
+            return new CompletionConfig(null, percentage, minimumSampleSize);
         }
     }
 }

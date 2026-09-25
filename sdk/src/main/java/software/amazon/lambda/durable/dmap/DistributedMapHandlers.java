@@ -1,13 +1,11 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
-package software.amazon.lambda.durable;
+package software.amazon.lambda.durable.dmap;
 
 import com.amazonaws.services.lambda.runtime.RequestHandler;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -15,6 +13,9 @@ import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import software.amazon.lambda.durable.DurableConfig;
+import software.amazon.lambda.durable.DurableContext;
+import software.amazon.lambda.durable.TypeToken;
 import software.amazon.lambda.durable.config.CompletionConfig;
 import software.amazon.lambda.durable.config.DistributedMapProcessor.ResponseMode;
 import software.amazon.lambda.durable.config.MapConfig;
@@ -22,29 +23,36 @@ import software.amazon.lambda.durable.execution.DurableExecutor;
 import software.amazon.lambda.durable.model.DurableExecutionInput;
 import software.amazon.lambda.durable.model.DurableExecutionOutput;
 import software.amazon.lambda.durable.model.MapResult;
-import software.amazon.lambda.durable.model.ReaderPage;
 import software.amazon.lambda.durable.serde.JacksonSerDes;
 import software.amazon.lambda.durable.serde.SerDes;
 
 /** Authoring helpers that wrap a customer function into a distributed map processor or reader Lambda handler. */
 public final class DistributedMapHandlers {
     private static final SerDes JSON = new JacksonSerDes();
-    private static final TypeToken<Object> OBJECT_TYPE = TypeToken.get(Object.class);
-    private static final TypeToken<Map<String, Object>> EVENT_TYPE = new TypeToken<Map<String, Object>>() {};
+    private static final TypeToken<String> OUTPUT_TYPE = TypeToken.get(String.class);
+    private static final int MIN_CONCURRENCY = 1;
+    private static final int DEFAULT_CONCURRENCY = 1;
+    private static final TypeToken<ProcessorEvent> EVENT_TYPE = TypeToken.get(ProcessorEvent.class);
     private static final int READER_STATE_LIMIT = 32 * 1024;
     private static final String ITEMS_OP_NAME = "distributed-map-items";
 
     private DistributedMapHandlers() {}
 
     private static void validateItemReport(ResponseMode report) {
-        if (report != ResponseMode.REPORT_ITEM_RESULTS && report != ResponseMode.REPORT_FAILED_ITEMS) {
+        if (report != ResponseMode.ITEM_RESULTS && report != ResponseMode.ITEM_FAILURES) {
             throw new IllegalArgumentException(
-                    "item handler report mode must be REPORT_ITEM_RESULTS or REPORT_FAILED_ITEMS, got: " + report);
+                    "item handler report mode must be ITEM_RESULTS or ITEM_FAILURES, got: " + report);
         }
     }
 
-    /** Wraps a per-item function as a processor handler. Use REPORT_ITEM_RESULTS or REPORT_FAILED_ITEMS. */
-    public static <I, O> RequestHandler<Map<String, Object>, Map<String, Object>> createDistributedMapItemHandler(
+    /** Wraps a per-item function as a processor handler, running one item at a time. */
+    public static <I, O> RequestHandler<ProcessorEvent, ProcessorResponse> createDistributedMapItemHandler(
+            Function<I, O> func, TypeToken<I> itemType, SerDes itemSerDes, SerDes resultSerDes, ResponseMode report) {
+        return createDistributedMapItemHandler(func, itemType, itemSerDes, resultSerDes, report, DEFAULT_CONCURRENCY);
+    }
+
+    /** Wraps a per-item function as a processor handler. Use ITEM_RESULTS or ITEM_FAILURES. */
+    public static <I, O> RequestHandler<ProcessorEvent, ProcessorResponse> createDistributedMapItemHandler(
             Function<I, O> func,
             TypeToken<I> itemType,
             SerDes itemSerDes,
@@ -52,21 +60,24 @@ public final class DistributedMapHandlers {
             ResponseMode report,
             int concurrency) {
         validateItemReport(report);
+        if (concurrency < MIN_CONCURRENCY) {
+            throw new IllegalArgumentException(
+                    "concurrency must be at least " + MIN_CONCURRENCY + ", got: " + concurrency);
+        }
         var inSerdes = itemSerDes != null ? itemSerDes : JSON;
         var outSerdes = resultSerDes != null ? resultSerDes : JSON;
         return (event, context) -> {
-            var records = records(event);
-            var workers = concurrency > 0 ? concurrency : Math.max(1, records.size());
-            var outputs = new Object[records.size()];
+            var records = event.records();
+            var outputs = new String[records.size()];
             var errors = new Throwable[records.size()];
-            var pool = Executors.newFixedThreadPool(workers);
+            var pool = Executors.newFixedThreadPool(concurrency);
             try {
                 var futures = new ArrayList<Future<?>>();
                 for (var i = 0; i < records.size(); i++) {
                     var index = i;
                     futures.add(pool.submit(() -> {
-                        I item = toItem(inSerdes, records.get(index).get("body"), itemType);
-                        outputs[index] = func.apply(item);
+                        I item = toItem(inSerdes, records.get(index).body(), itemType);
+                        outputs[index] = outSerdes.serialize(func.apply(item));
                         return null;
                     }));
                 }
@@ -85,22 +96,24 @@ public final class DistributedMapHandlers {
                 pool.shutdown();
             }
 
-            var results = new ArrayList<Map<String, Object>>();
-            var failures = new ArrayList<Map<String, Object>>();
+            var results = new ArrayList<ItemResult>();
+            var failures = new ArrayList<ItemFailure>();
             for (var i = 0; i < records.size(); i++) {
-                var itemId = (String) records.get(i).get("itemId");
+                var itemId = records.get(i).itemId();
                 if (errors[i] != null) {
-                    failures.add(errorEntry(itemId, errors[i].getClass().getName(), errors[i].getMessage()));
-                } else if (report == ResponseMode.REPORT_ITEM_RESULTS) {
-                    results.add(resultEntry(itemId, toJsonValue(outSerdes, outputs[i])));
+                    failures.add(new ItemFailure(itemId, ItemFailure.ErrorDetail.of(errors[i])));
+                } else if (report == ResponseMode.ITEM_RESULTS) {
+                    results.add(new ItemResult(itemId, outputs[i]));
                 }
             }
-            return itemResponse(report, results, failures);
+            return report == ResponseMode.ITEM_RESULTS
+                    ? ProcessorResponse.itemResults(results, failures)
+                    : ProcessorResponse.itemFailures(failures);
         };
     }
 
     /** Wraps a whole-batch function as a processor handler. Returning succeeds every item, throwing fails the batch. */
-    public static <I> RequestHandler<Map<String, Object>, Object> createDistributedMapBatchHandler(
+    public static <I> RequestHandler<ProcessorEvent, Void> createDistributedMapBatchHandler(
             Consumer<List<I>> func, TypeToken<I> itemType, SerDes itemSerDes) {
         var serdes = itemSerDes != null ? itemSerDes : JSON;
         return (event, context) -> {
@@ -110,34 +123,26 @@ public final class DistributedMapHandlers {
     }
 
     /** Wraps a reader function as a source handler. A null nextState signals the source is exhausted. */
-    public static <I, S> RequestHandler<Map<String, Object>, Map<String, Object>> createDistributedMapReader(
+    public static <I, S> RequestHandler<ReaderEvent, ReaderResponse<I>> createDistributedMapReader(
             Function<S, ReaderPage<I, S>> func, TypeToken<S> stateType, SerDes stateSerDes) {
         var serdes = stateSerDes != null ? stateSerDes : JSON;
         return (event, context) -> {
-            if (!(event.get("maxItems") instanceof Number maxItemsValue)) {
-                throw new IllegalStateException("expected a distributed map reader event carrying a numeric 'maxItems' (got keys: "
-                        + event.keySet() + "), the function must be registered as a distributed map reader");
-            }
-            var rawState = (String) event.get("state");
-            S state = rawState != null ? serdes.deserialize(rawState, stateType) : null;
-            var maxItems = maxItemsValue.intValue();
+            S state = event.state() != null ? serdes.deserialize(event.state(), stateType) : null;
 
             var page = func.apply(state);
-            if (page.items().size() > maxItems) {
+            if (page.items().size() > event.maxItems()) {
                 throw new IllegalStateException(
-                        "reader returned " + page.items().size() + " items, exceeding maxItems " + maxItems);
+                        "reader returned " + page.items().size() + " items, exceeding maxItems " + event.maxItems());
             }
-            var response = new LinkedHashMap<String, Object>();
-            response.put("items", page.items());
+            String nextState = null;
             if (page.nextState() != null) {
-                var nextState = serdes.serialize(page.nextState());
+                nextState = serdes.serialize(page.nextState());
                 if (nextState.getBytes(StandardCharsets.UTF_8).length > READER_STATE_LIMIT) {
                     throw new IllegalStateException(
                             "reader nextState exceeds the " + (READER_STATE_LIMIT / 1024) + " KB limit");
                 }
-                response.put("nextState", nextState);
             }
-            return response;
+            return new ReaderResponse<>(page.items(), nextState);
         };
     }
 
@@ -156,39 +161,42 @@ public final class DistributedMapHandlers {
         return DurableExecutor.wrap(
                 EVENT_TYPE,
                 (event, ctx) -> {
-                    var records = records(event);
-                    var bodies = new ArrayList<Object>(records.size());
+                    var records = event.records();
+                    var bodies = new ArrayList<String>(records.size());
                     for (var record : records) {
-                        bodies.add(record.get("body"));
+                        bodies.add(record.body());
                     }
-                    MapResult<Object> batch = ctx.map(
+                    MapResult<String> batch = ctx.map(
                             ITEMS_OP_NAME,
                             bodies,
-                            OBJECT_TYPE,
+                            OUTPUT_TYPE,
                             (body, index, mapContext) ->
-                                    (Object) func.apply(mapContext, toItem(inSerdes, body, itemType)),
+                                    outSerdes.serialize(func.apply(mapContext, toItem(inSerdes, body, itemType))),
                             MapConfig.builder()
                                     .completionConfig(CompletionConfig.allCompleted())
                                     .build());
 
-                    var results = new ArrayList<Map<String, Object>>();
-                    var failures = new ArrayList<Map<String, Object>>();
+                    var results = new ArrayList<ItemResult>();
+                    var failures = new ArrayList<ItemFailure>();
                     for (var i = 0; i < records.size(); i++) {
-                        var itemId = (String) records.get(i).get("itemId");
+                        var itemId = records.get(i).itemId();
                         var item = batch.getItem(i);
                         if (item.status() == MapResult.MapResultItem.Status.SUCCEEDED) {
-                            if (report == ResponseMode.REPORT_ITEM_RESULTS) {
-                                results.add(resultEntry(itemId, toJsonValue(outSerdes, item.result())));
+                            if (report == ResponseMode.ITEM_RESULTS) {
+                                results.add(new ItemResult(itemId, item.result()));
                             }
                         } else {
                             var error = item.error();
-                            failures.add(errorEntry(
+                            failures.add(new ItemFailure(
                                     itemId,
-                                    error != null ? error.errorType() : "",
-                                    error != null ? error.errorMessage() : ""));
+                                    error != null
+                                            ? new ItemFailure.ErrorDetail(error.errorType(), error.errorMessage())
+                                            : null));
                         }
                     }
-                    return itemResponse(report, results, failures);
+                    return report == ResponseMode.ITEM_RESULTS
+                            ? ProcessorResponse.itemResults(results, failures)
+                            : ProcessorResponse.itemFailures(failures);
                 },
                 DurableConfig.defaultConfig());
     }
@@ -208,58 +216,16 @@ public final class DistributedMapHandlers {
                 DurableConfig.defaultConfig());
     }
 
-    @SuppressWarnings("unchecked")
-    private static List<Map<String, Object>> records(Map<String, Object> event) {
-        if (!(event.get("records") instanceof List)) {
-            throw new IllegalStateException("expected a distributed map processor event carrying a 'records' array (got keys: "
-                    + event.keySet() + "), the function must be triggered by a distributed map, not invoked directly");
-        }
-        return (List<Map<String, Object>>) event.get("records");
-    }
-
-    private static <I> List<I> toItems(SerDes serdes, Map<String, Object> event, TypeToken<I> itemType) {
-        var records = records(event);
+    private static <I> List<I> toItems(SerDes serdes, ProcessorEvent event, TypeToken<I> itemType) {
+        var records = event.records();
         var items = new ArrayList<I>(records.size());
         for (var record : records) {
-            items.add(toItem(serdes, record.get("body"), itemType));
+            items.add(toItem(serdes, record.body(), itemType));
         }
         return items;
     }
 
-    private static <I> I toItem(SerDes serdes, Object body, TypeToken<I> itemType) {
-        return serdes.deserialize(JSON.serialize(body), itemType);
-    }
-
-    private static Object toJsonValue(SerDes serdes, Object value) {
-        return JSON.deserialize(serdes.serialize(value), OBJECT_TYPE);
-    }
-
-    private static Map<String, Object> resultEntry(String itemId, Object output) {
-        var entry = new LinkedHashMap<String, Object>();
-        entry.put("itemIdentifier", itemId);
-        entry.put("output", output);
-        return entry;
-    }
-
-    private static Map<String, Object> errorEntry(String itemId, String errorType, String errorMessage) {
-        var error = new LinkedHashMap<String, Object>();
-        error.put("errorType", errorType);
-        error.put("errorMessage", errorMessage);
-        var entry = new LinkedHashMap<String, Object>();
-        entry.put("itemIdentifier", itemId);
-        entry.put("error", error);
-        return entry;
-    }
-
-    private static Map<String, Object> itemResponse(
-            ResponseMode report, List<Map<String, Object>> results, List<Map<String, Object>> failures) {
-        var response = new LinkedHashMap<String, Object>();
-        if (report == ResponseMode.REPORT_FAILED_ITEMS) {
-            response.put("batchItemFailures", failures);
-        } else {
-            response.put("batchItemResults", results);
-            response.put("batchItemFailures", failures);
-        }
-        return response;
+    private static <I> I toItem(SerDes serdes, String body, TypeToken<I> itemType) {
+        return serdes.deserialize(body, itemType);
     }
 }

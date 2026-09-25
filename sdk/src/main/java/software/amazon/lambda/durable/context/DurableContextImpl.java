@@ -3,7 +3,6 @@
 package software.amazon.lambda.durable.context;
 
 import com.amazonaws.services.lambda.runtime.Context;
-import software.amazon.awssdk.services.lambda.model.DistributedMapDetails;
 import java.time.Duration;
 import java.util.Collection;
 import java.util.List;
@@ -11,6 +10,7 @@ import java.util.Objects;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.Function;
+import software.amazon.awssdk.services.lambda.model.DistributedMapDetails;
 import software.amazon.lambda.durable.DurableCallbackFuture;
 import software.amazon.lambda.durable.DurableConfig;
 import software.amazon.lambda.durable.DurableContext;
@@ -36,6 +36,7 @@ import software.amazon.lambda.durable.execution.OperationIdGenerator;
 import software.amazon.lambda.durable.execution.SuspendExecutionException;
 import software.amazon.lambda.durable.execution.ThreadType;
 import software.amazon.lambda.durable.model.DistributedMapResult;
+import software.amazon.lambda.durable.model.DistributedMapStatus;
 import software.amazon.lambda.durable.model.DistributedMapSummary;
 import software.amazon.lambda.durable.model.MapResult;
 import software.amazon.lambda.durable.model.OperationIdentifier;
@@ -44,7 +45,6 @@ import software.amazon.lambda.durable.model.WaitForConditionResult;
 import software.amazon.lambda.durable.operation.CallbackOperation;
 import software.amazon.lambda.durable.operation.ChildContextOperation;
 import software.amazon.lambda.durable.operation.DistributedMapOperation;
-import software.amazon.lambda.durable.operation.DistributedMapWire;
 import software.amazon.lambda.durable.operation.InvokeOperation;
 import software.amazon.lambda.durable.operation.MapOperation;
 import software.amazon.lambda.durable.operation.ParallelOperation;
@@ -63,6 +63,9 @@ import software.amazon.lambda.durable.util.ParameterValidator;
 public class DurableContextImpl extends BaseContextImpl implements DurableContext {
     private static final String WAIT_FOR_CALLBACK_CALLBACK_SUFFIX = "-callback";
     private static final String WAIT_FOR_CALLBACK_SUBMITTER_SUFFIX = "-submitter";
+    // The service model declares maxConcurrency as range(min: 1, max: 10000).
+    private static final int MIN_MAX_CONCURRENCY = 1;
+    private static final int MAX_MAX_CONCURRENCY = 10000;
     private static final int MAX_WAIT_FOR_CALLBACK_NAME_LENGTH = ParameterValidator.MAX_OPERATION_NAME_LENGTH
             - Math.max(WAIT_FOR_CALLBACK_CALLBACK_SUFFIX.length(), WAIT_FOR_CALLBACK_SUBMITTER_SUFFIX.length());
     private final OperationIdGenerator operationIdGenerator;
@@ -396,7 +399,7 @@ public class DurableContextImpl extends BaseContextImpl implements DurableContex
                 config,
                 false,
                 TypeToken.get(DistributedMapSummary.class),
-                DistributedMapWire::toSummary);
+                DistributedMapOperation::toSummary);
     }
 
     @Override
@@ -409,8 +412,9 @@ public class DurableContextImpl extends BaseContextImpl implements DurableContex
             DistributedMapConfig config) {
         Objects.requireNonNull(resultType, "resultType cannot be null");
         Objects.requireNonNull(config, "config cannot be null");
-        var resultSerDes =
-                config.resultSerDes() != null ? config.resultSerDes() : getDurableConfig().getSerDes();
+        var resultSerDes = config.resultSerDes() != null
+                ? config.resultSerDes()
+                : getDurableConfig().getSerDes();
         @SuppressWarnings({"unchecked", "rawtypes"})
         TypeToken<DistributedMapResult<O>> token = (TypeToken) TypeToken.get(DistributedMapResult.class);
         return startDistributedMap(
@@ -421,7 +425,7 @@ public class DurableContextImpl extends BaseContextImpl implements DurableContex
                 config,
                 true,
                 token,
-                details -> DistributedMapWire.toResult(details, resultType, resultSerDes));
+                (status, details) -> DistributedMapOperation.toResult(status, details, resultType, resultSerDes));
     }
 
     private <R> DurableFuture<R> startDistributedMap(
@@ -432,19 +436,20 @@ public class DurableContextImpl extends BaseContextImpl implements DurableContex
             DistributedMapConfig config,
             boolean collectResults,
             TypeToken<R> resultType,
-            Function<DistributedMapDetails, R> resultBuilder) {
+            BiFunction<DistributedMapStatus, DistributedMapDetails, R> resultBuilder) {
         Objects.requireNonNull(source, "source cannot be null");
         Objects.requireNonNull(processor, "processor cannot be null");
         Objects.requireNonNull(config, "config cannot be null");
         ParameterValidator.validateOperationName(name);
-        if (maxConcurrency <= 0) {
-            throw new IllegalArgumentException("maxConcurrency must be greater than zero, got: " + maxConcurrency);
+        if (maxConcurrency < MIN_MAX_CONCURRENCY || maxConcurrency > MAX_MAX_CONCURRENCY) {
+            throw new IllegalArgumentException("maxConcurrency must be between " + MIN_MAX_CONCURRENCY + " and "
+                    + MAX_MAX_CONCURRENCY + ", got: " + maxConcurrency);
         }
         if (!collectResults && config.resultSerDes() != null) {
             throw new IllegalArgumentException(
                     "resultSerDes is set but this distributedMap call does not collect results, use a resultType overload");
         }
-        var options = DistributedMapWire.toOptions(
+        var options = DistributedMapOperation.toOptions(
                 source, processor, maxConcurrency, config, getDurableConfig().getSerDes(), collectResults);
         var operationId = nextOperationId();
         var operation = new DistributedMapOperation<>(
