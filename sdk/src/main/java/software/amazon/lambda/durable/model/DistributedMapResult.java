@@ -5,10 +5,10 @@ package software.amazon.lambda.durable.model;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
-import software.amazon.lambda.durable.exception.DistributedMapError;
+import software.amazon.lambda.durable.exception.DistributedMapException;
 
 /** Outcome of a distributed map run with collected per-item results. */
-public record DistributedMapResult<O>(DistributedMapSummary summary, List<DistributedMapResultItem<O>> items) {
+public record DistributedMapResult<O>(DistributedMapSummary summary, List<Item<O>> items) {
 
     /** Applies a defensive copy and defaults. */
     public DistributedMapResult {
@@ -16,27 +16,27 @@ public record DistributedMapResult<O>(DistributedMapSummary summary, List<Distri
     }
 
     /** Returns items that succeeded. */
-    public List<DistributedMapResultItem<O>> succeeded() {
+    public List<Item<O>> succeeded() {
         return items.stream()
-                .filter(item -> item.status() == DistributedMapResultItem.Status.SUCCEEDED)
+                .filter(item -> item.status() == Item.Status.SUCCEEDED)
                 .toList();
     }
 
     /** Returns items that failed. */
-    public List<DistributedMapResultItem<O>> failed() {
+    public List<Item<O>> failed() {
         return items.stream()
-                .filter(item -> item.status() == DistributedMapResultItem.Status.FAILED)
+                .filter(item -> item.status() == Item.Status.FAILED)
                 .toList();
     }
 
-    /** Returns the outputs of succeeded items. */
+    /** Returns the outputs of succeeded items (includes null outputs from successful items). */
     public List<O> getResults() {
-        return succeeded().stream().map(DistributedMapResultItem::output).filter(Objects::nonNull).toList();
+        return succeeded().stream().map(Item::output).toList();
     }
 
     /** Returns the errors of failed items. */
-    public List<DistributedMapItemError> getErrors() {
-        return failed().stream().map(DistributedMapResultItem::error).filter(Objects::nonNull).toList();
+    public List<ItemError> getErrors() {
+        return failed().stream().map(Item::error).filter(Objects::nonNull).toList();
     }
 
     /** Returns the terminal run status. */
@@ -74,11 +74,6 @@ public record DistributedMapResult<O>(DistributedMapSummary summary, List<Distri
         return summary.distributedMapRunArn();
     }
 
-    /** Returns the run id derived from the ARN, or null when the run never started. */
-    public String distributedMapId() {
-        return summary.distributedMapId();
-    }
-
     /** Returns the completion details, or null when absent. */
     public String completionDetails() {
         return summary.completionDetails();
@@ -89,7 +84,7 @@ public record DistributedMapResult<O>(DistributedMapSummary summary, List<Distri
         return summary.hasFailure();
     }
 
-    /** Throws DistributedMapError when the run did not fully succeed, surfacing the first failed item. */
+    /** Throws DistributedMapException when the run did not fully succeed, surfacing the first failed item. */
     public void throwIfError() {
         if (summary.status() != DistributedMapStatus.SUCCEEDED) {
             summary.throwIfError();
@@ -98,7 +93,7 @@ public record DistributedMapResult<O>(DistributedMapSummary summary, List<Distri
         var failedItems = failed();
         if (!failedItems.isEmpty()) {
             var first = failedItems.get(0);
-            throw DistributedMapError.itemLevel(
+            throw DistributedMapException.itemLevel(
                     summary.status(),
                     summary.completionReason(),
                     summary.failureCount(),
@@ -107,6 +102,35 @@ public record DistributedMapResult<O>(DistributedMapSummary summary, List<Distri
         }
         if (summary.hasFailure()) {
             summary.throwIfError();
+        }
+    }
+
+    /** Outcome of a single distributed map item. */
+    public record Item<O>(String itemId, Status status, O output, ItemError error) {
+
+        /** Status of an individual distributed map item. */
+        public enum Status {
+            SUCCEEDED,
+            FAILED
+        }
+
+        /** Creates a succeeded item. */
+        public static <O> Item<O> succeeded(String itemId, O output) {
+            return new Item<>(itemId, Status.SUCCEEDED, output, null);
+        }
+
+        /** Creates a failed item. */
+        public static <O> Item<O> failed(String itemId, ItemError error) {
+            return new Item<>(itemId, Status.FAILED, null, error);
+        }
+    }
+
+    /** Error details for a failed distributed map item. */
+    public record ItemError(String errorType, String errorMessage) {
+
+        /** Creates an item error from a throwable. */
+        public static ItemError of(Throwable e) {
+            return new ItemError(e.getClass().getName(), e.getMessage());
         }
     }
 }

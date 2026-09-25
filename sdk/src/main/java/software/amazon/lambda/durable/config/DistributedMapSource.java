@@ -125,28 +125,47 @@ public class DistributedMapSource<I> {
     /** Read each object under a prefix as one item (object contents are not read). */
     public static <I> DistributedMapSource<I> s3Objects(String prefixUri) {
         var parsed = DistributedMapValidation.parseS3Uri(prefixUri);
-        return s3(new S3SourceConfig(parsed.bucket(), null, prefixOrEmpty(parsed.path()), Transform.NONE, null, null, null));
+        return s3(new S3SourceConfig(
+                parsed.bucket(), null, prefixOrEmpty(parsed.path()), Transform.NONE, null, null, null));
     }
 
     /** Read a prefix, flattening each object's lines into items. */
     public static <I> DistributedMapSource<I> s3FlattenedJsonLines(String prefixUri) {
         var parsed = DistributedMapValidation.parseS3Uri(prefixUri);
         return s3(new S3SourceConfig(
-                parsed.bucket(), null, prefixOrEmpty(parsed.path()), Transform.LOAD_AND_FLATTEN, Format.JSON_LINES, null, null));
+                parsed.bucket(),
+                null,
+                prefixOrEmpty(parsed.path()),
+                Transform.LOAD_AND_FLATTEN,
+                Format.JSON_LINES,
+                null,
+                null));
     }
 
     /** Read a prefix, flattening each object's JSON array elements into items. */
     public static <I> DistributedMapSource<I> s3FlattenedJsonArray(String prefixUri) {
         var parsed = DistributedMapValidation.parseS3Uri(prefixUri);
         return s3(new S3SourceConfig(
-                parsed.bucket(), null, prefixOrEmpty(parsed.path()), Transform.LOAD_AND_FLATTEN, Format.JSON_ARRAY, null, null));
+                parsed.bucket(),
+                null,
+                prefixOrEmpty(parsed.path()),
+                Transform.LOAD_AND_FLATTEN,
+                Format.JSON_ARRAY,
+                null,
+                null));
     }
 
     /** Read a prefix, flattening each object's records into items. */
     public static <I> DistributedMapSource<I> s3FlattenedCsv(String prefixUri, CsvFormat format) {
         var parsed = DistributedMapValidation.parseS3Uri(prefixUri);
         return s3(new S3SourceConfig(
-                parsed.bucket(), null, prefixOrEmpty(parsed.path()), Transform.LOAD_AND_FLATTEN, Format.CSV, format, null));
+                parsed.bucket(),
+                null,
+                prefixOrEmpty(parsed.path()),
+                Transform.LOAD_AND_FLATTEN,
+                Format.CSV,
+                format,
+                null));
     }
 
     /** Page items from a customer-supplied reader Lambda function. */
@@ -207,6 +226,65 @@ public class DistributedMapSource<I> {
     public record ReaderSourceConfig(String functionName, Object initialState, SerDes stateSerDes) {
         public ReaderSourceConfig {
             DistributedMapValidation.validateFunctionName(functionName);
+        }
+    }
+
+    /** CSV parsing options for a distributed map S3 source. */
+    public record CsvFormat(HeaderLocation headerLocation, List<String> columns, CsvDelimiter delimiter) {
+
+        /** Where the column header row comes from. */
+        public enum HeaderLocation {
+            FIRST_ROW,
+            GIVEN
+        }
+
+        public CsvFormat {
+            columns = columns != null ? List.copyOf(columns) : null;
+            delimiter = delimiter != null ? delimiter : CsvDelimiter.COMMA;
+        }
+
+        /**
+         * File has its own header row. Column names are used only for compile-time typing and are not sent on the wire.
+         */
+        public static CsvFormat expectedColumns(List<String> columns) {
+            DistributedMapValidation.validateColumns("expectedColumns", columns);
+            return new CsvFormat(HeaderLocation.FIRST_ROW, columns, CsvDelimiter.COMMA);
+        }
+
+        /** File has no header row. The given names are the columns, sent on the wire, and the first row is data. */
+        public static CsvFormat headers(List<String> headers) {
+            DistributedMapValidation.validateColumns("headers", headers);
+            return new CsvFormat(HeaderLocation.GIVEN, headers, CsvDelimiter.COMMA);
+        }
+
+        /** File has its own header row and no column names are declared. */
+        public static CsvFormat firstRow() {
+            return new CsvFormat(HeaderLocation.FIRST_ROW, null, CsvDelimiter.COMMA);
+        }
+
+        /** Returns a copy with the given delimiter. */
+        public CsvFormat withDelimiter(CsvDelimiter delimiter) {
+            return new CsvFormat(headerLocation, columns, delimiter);
+        }
+    }
+
+    /** Delimiter for CSV distributed map sources. */
+    public enum CsvDelimiter {
+        COMMA("COMMA"),
+        PIPE("PIPE"),
+        SEMICOLON("SEMICOLON"),
+        SPACE("SPACE"),
+        TAB("TAB");
+
+        private final String value;
+
+        CsvDelimiter(String value) {
+            this.value = value;
+        }
+
+        /** Returns the wire-format string value. */
+        public String getValue() {
+            return value;
         }
     }
 }
