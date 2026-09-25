@@ -1,6 +1,6 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
-package software.amazon.lambda.durable.model;
+package software.amazon.lambda.durable.dmap;
 
 import java.util.Collections;
 import java.util.List;

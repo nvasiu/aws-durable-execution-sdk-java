@@ -270,6 +270,29 @@ class CheckpointManager {
                 + update.type().toString().length()
                 + update.action().toString().length()
                 + (update.payload() != null ? update.payload().length() : 0)
+                + inlineItemsSize(update)
                 + 100;
+    }
+
+    /**
+     * Size of a distributed map START update's inline source items. These are the only operation options holding
+     * customer data, and they are carried outside the payload, so they are measured separately.
+     */
+    private static int inlineItemsSize(OperationUpdate update) {
+        var options = update.distributedMapOptions();
+        if (options == null || options.source() == null || options.source().inlineSourceConfig() == null) {
+            return 0;
+        }
+        var config = options.source().inlineSourceConfig();
+        if (!config.hasItems()) {
+            return 0;
+        }
+        var size = 0;
+        for (var item : config.items()) {
+            if (item != null) {
+                size += item.length();
+            }
+        }
+        return size;
     }
 }
