@@ -23,7 +23,6 @@ public enum OperationSubType {
     WAIT_FOR_CALLBACK(OperationType.CONTEXT, "WaitForCallback"),
     WAIT_FOR_CONDITION(OperationType.STEP, "WaitForCondition"),
     WITH_RETRY(OperationType.CONTEXT, "WithRetry"),
-    // Requires OperationType.DISTRIBUTED_MAP, generated once the Lambda client ships the distributed-map shapes.
     DISTRIBUTED_MAP(OperationType.DISTRIBUTED_MAP, "DistributedMap");
 
     private final OperationType operationType;

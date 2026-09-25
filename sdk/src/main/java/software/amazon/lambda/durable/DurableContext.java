@@ -551,15 +551,27 @@ public interface DurableContext extends BaseContext {
 
     // =============== distributedMap ================
 
-    /** Runs a distributed map with default config, blocking until the run reaches a terminal state. */
+    /**
+     * Runs a distributed map with default config, blocking until the run reaches a terminal state.
+     *
+     * @param maxConcurrency the maximum number of items processed concurrently. Required, with no service default.
+     */
     default <I> DistributedMapSummary distributedMap(
             String name, DistributedMapSource<I> source, DistributedMapProcessor processor, int maxConcurrency) {
         return distributedMapAsync(
-                        name, source, processor, maxConcurrency, DistributedMapConfig.builder().build())
+                        name,
+                        source,
+                        processor,
+                        maxConcurrency,
+                        DistributedMapConfig.builder().build())
                 .get();
     }
 
-    /** Runs a distributed map, blocking until the run reaches a terminal state. */
+    /**
+     * Runs a distributed map, blocking until the run reaches a terminal state.
+     *
+     * @param maxConcurrency the maximum number of items processed concurrently. Required, with no service default.
+     */
     default <I> DistributedMapSummary distributedMap(
             String name,
             DistributedMapSource<I> source,
@@ -570,7 +582,12 @@ public interface DurableContext extends BaseContext {
                 .get();
     }
 
-    /** Runs a distributed map that collects per-item results with a TypeToken, blocking until the run reaches a terminal state. */
+    /**
+     * Runs a distributed map that collects per-item results with a TypeToken, blocking until the run reaches a terminal
+     * state.
+     *
+     * @param maxConcurrency the maximum number of items processed concurrently. Required, with no service default.
+     */
     default <I, O> DistributedMapResult<O> distributedMap(
             String name,
             DistributedMapSource<I> source,
@@ -582,7 +599,12 @@ public interface DurableContext extends BaseContext {
                 .get();
     }
 
-    /** Runs a distributed map that collects per-item results with a result Class, blocking until the run reaches a terminal state. */
+    /**
+     * Runs a distributed map that collects per-item results with a result Class, blocking until the run reaches a
+     * terminal state.
+     *
+     * @param maxConcurrency the maximum number of items processed concurrently. Required, with no service default.
+     */
     default <I, O> DistributedMapResult<O> distributedMap(
             String name,
             DistributedMapSource<I> source,
@@ -594,7 +616,12 @@ public interface DurableContext extends BaseContext {
                 .get();
     }
 
-    /** Runs a distributed map that collects per-item results with a result Class and default config, blocking until the run reaches a terminal state. */
+    /**
+     * Runs a distributed map that collects per-item results with a result Class and default config, blocking until the
+     * run reaches a terminal state.
+     *
+     * @param maxConcurrency the maximum number of items processed concurrently. Required, with no service default.
+     */
     default <I, O> DistributedMapResult<O> distributedMap(
             String name,
             DistributedMapSource<I> source,
@@ -611,7 +638,12 @@ public interface DurableContext extends BaseContext {
                 .get();
     }
 
-    /** Runs a distributed map that collects per-item results with a TypeToken and default config, blocking until the run reaches a terminal state. */
+    /**
+     * Runs a distributed map that collects per-item results with a TypeToken and default config, blocking until the run
+     * reaches a terminal state.
+     *
+     * @param maxConcurrency the maximum number of items processed concurrently. Required, with no service default.
+     */
     default <I, O> DistributedMapResult<O> distributedMap(
             String name,
             DistributedMapSource<I> source,
@@ -619,18 +651,35 @@ public interface DurableContext extends BaseContext {
             int maxConcurrency,
             TypeToken<O> resultType) {
         return distributedMapAsync(
-                        name, source, processor, maxConcurrency, resultType, DistributedMapConfig.builder().build())
+                        name,
+                        source,
+                        processor,
+                        maxConcurrency,
+                        resultType,
+                        DistributedMapConfig.builder().build())
                 .get();
     }
 
-    /** Asynchronously runs a distributed map with default config. */
+    /**
+     * Asynchronously runs a distributed map with default config.
+     *
+     * @param maxConcurrency the maximum number of items processed concurrently. Required, with no service default.
+     */
     default <I> DurableFuture<DistributedMapSummary> distributedMapAsync(
             String name, DistributedMapSource<I> source, DistributedMapProcessor processor, int maxConcurrency) {
         return distributedMapAsync(
-                name, source, processor, maxConcurrency, DistributedMapConfig.builder().build());
+                name,
+                source,
+                processor,
+                maxConcurrency,
+                DistributedMapConfig.builder().build());
     }
 
-    /** Asynchronously runs a distributed map. */
+    /**
+     * Asynchronously runs a distributed map.
+     *
+     * @param maxConcurrency the maximum number of items processed concurrently. Required, with no service default.
+     */
     <I> DurableFuture<DistributedMapSummary> distributedMapAsync(
             String name,
             DistributedMapSource<I> source,
@@ -638,7 +687,11 @@ public interface DurableContext extends BaseContext {
             int maxConcurrency,
             DistributedMapConfig config);
 
-    /** Asynchronously runs a distributed map that collects per-item results with a TypeToken. */
+    /**
+     * Asynchronously runs a distributed map that collects per-item results with a TypeToken.
+     *
+     * @param maxConcurrency the maximum number of items processed concurrently. Required, with no service default.
+     */
     <I, O> DurableFuture<DistributedMapResult<O>> distributedMapAsync(
             String name,
             DistributedMapSource<I> source,
@@ -647,7 +700,11 @@ public interface DurableContext extends BaseContext {
             TypeToken<O> resultType,
             DistributedMapConfig config);
 
-    /** Asynchronously runs a distributed map that collects per-item results with a result Class. */
+    /**
+     * Asynchronously runs a distributed map that collects per-item results with a result Class.
+     *
+     * @param maxConcurrency the maximum number of items processed concurrently. Required, with no service default.
+     */
     default <I, O> DurableFuture<DistributedMapResult<O>> distributedMapAsync(
             String name,
             DistributedMapSource<I> source,
@@ -658,7 +715,11 @@ public interface DurableContext extends BaseContext {
         return distributedMapAsync(name, source, processor, maxConcurrency, TypeToken.get(resultType), config);
     }
 
-    /** Asynchronously runs a distributed map that collects per-item results with a result Class and default config. */
+    /**
+     * Asynchronously runs a distributed map that collects per-item results with a result Class and default config.
+     *
+     * @param maxConcurrency the maximum number of items processed concurrently. Required, with no service default.
+     */
     default <I, O> DurableFuture<DistributedMapResult<O>> distributedMapAsync(
             String name,
             DistributedMapSource<I> source,
@@ -674,7 +735,11 @@ public interface DurableContext extends BaseContext {
                 DistributedMapConfig.builder().build());
     }
 
-    /** Asynchronously runs a distributed map that collects per-item results with a TypeToken and default config. */
+    /**
+     * Asynchronously runs a distributed map that collects per-item results with a TypeToken and default config.
+     *
+     * @param maxConcurrency the maximum number of items processed concurrently. Required, with no service default.
+     */
     default <I, O> DurableFuture<DistributedMapResult<O>> distributedMapAsync(
             String name,
             DistributedMapSource<I> source,
@@ -682,7 +747,12 @@ public interface DurableContext extends BaseContext {
             int maxConcurrency,
             TypeToken<O> resultType) {
         return distributedMapAsync(
-                name, source, processor, maxConcurrency, resultType, DistributedMapConfig.builder().build());
+                name,
+                source,
+                processor,
+                maxConcurrency,
+                resultType,
+                DistributedMapConfig.builder().build());
     }
 
     /**

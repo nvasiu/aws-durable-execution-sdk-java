@@ -2,8 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 package software.amazon.lambda.durable.util;
 
-import java.util.HashSet;
-import java.util.List;
 import java.util.regex.Pattern;
 
 /** Shared validation and S3 URI parsing for distributed map configuration. */
@@ -29,18 +27,6 @@ public final class DistributedMapValidation {
                 && !ACCOUNT_ID.matcher(expectedBucketOwner).matches()) {
             throw new IllegalArgumentException(
                     "expectedBucketOwner must be a 12-digit account id, got: " + expectedBucketOwner);
-        }
-    }
-
-    public static void validateColumns(String parameterName, List<String> columns) {
-        if (columns == null) {
-            return;
-        }
-        if (columns.isEmpty()) {
-            throw new IllegalArgumentException(parameterName + " cannot be empty");
-        }
-        if (new HashSet<>(columns).size() != columns.size()) {
-            throw new IllegalArgumentException(parameterName + " must not contain duplicates");
         }
     }
 
