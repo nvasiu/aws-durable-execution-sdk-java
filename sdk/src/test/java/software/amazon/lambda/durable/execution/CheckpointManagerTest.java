@@ -9,6 +9,7 @@ import static org.mockito.Mockito.*;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -20,6 +21,10 @@ import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.http.SdkHttpResponse;
 import software.amazon.awssdk.services.lambda.model.CheckpointDurableExecutionResponse;
 import software.amazon.awssdk.services.lambda.model.CheckpointUpdatedExecutionState;
+import software.amazon.awssdk.services.lambda.model.DistributedMapInlineSourceConfig;
+import software.amazon.awssdk.services.lambda.model.DistributedMapOptions;
+import software.amazon.awssdk.services.lambda.model.DistributedMapSourceConfig;
+import software.amazon.awssdk.services.lambda.model.DistributedMapSourceType;
 import software.amazon.awssdk.services.lambda.model.GetDurableExecutionStateResponse;
 import software.amazon.awssdk.services.lambda.model.Operation;
 import software.amazon.awssdk.services.lambda.model.OperationAction;
@@ -73,6 +78,51 @@ class CheckpointManagerTest {
 
         verify(client).checkpoint(eq("arn:test"), eq("token-1"), anyList());
         assertTrue(future.isDone());
+    }
+
+    @Test
+    void checkpoint_sendsLargeInlineSourceInItsOwnRequest() throws Exception {
+        // 800 KB of inline items, over the 750 KB batch limit, so this update cannot share a request.
+        var items = Collections.nCopies(800, "x".repeat(1024));
+        var dmapStart = OperationUpdate.builder()
+                .id("op-dmap")
+                .type(OperationType.DISTRIBUTED_MAP)
+                .action(OperationAction.START)
+                .distributedMapOptions(DistributedMapOptions.builder()
+                        .source(DistributedMapSourceConfig.builder()
+                                .type(DistributedMapSourceType.INLINE)
+                                .inlineSourceConfig(DistributedMapInlineSourceConfig.builder()
+                                        .items(items)
+                                        .build())
+                                .build())
+                        .build())
+                .build();
+        var step = OperationUpdate.builder()
+                .id("op-step")
+                .type(OperationType.STEP)
+                .action(OperationAction.START)
+                .build();
+
+        var sent = new ArrayList<List<OperationUpdate>>();
+        when(client.checkpoint(anyString(), anyString(), anyList())).thenAnswer(invocation -> {
+            sent.add(invocation.getArgument(2));
+            return CheckpointDurableExecutionResponse.builder()
+                    .checkpointToken("token-2")
+                    .build();
+        });
+
+        var first = batcher.checkpoint(dmapStart);
+        var second = batcher.checkpoint(step);
+        first.get(500, TimeUnit.MILLISECONDS);
+        second.get(500, TimeUnit.MILLISECONDS);
+
+        assertEquals(2, sent.size(), "the oversized update must not share a request");
+        assertEquals(
+                List.of("op-dmap"),
+                sent.get(0).stream().map(OperationUpdate::id).toList());
+        assertEquals(
+                List.of("op-step"),
+                sent.get(1).stream().map(OperationUpdate::id).toList());
     }
 
     @Test
