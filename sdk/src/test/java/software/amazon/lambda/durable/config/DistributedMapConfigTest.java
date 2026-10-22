@@ -1,0 +1,93 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+package software.amazon.lambda.durable.config;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+import org.junit.jupiter.api.Test;
+
+class DistributedMapConfigTest {
+
+    @Test
+    void failureCount_setsCount() {
+        var config = DistributedMapConfig.CompletionConfig.failureCount(3);
+
+        assertEquals(3, config.toleratedFailureCount());
+        assertNull(config.toleratedFailurePercentage());
+        assertNull(config.minimumSampleSize());
+    }
+
+    @Test
+    void failureCount_withZero_shouldPass() {
+        assertEquals(0, DistributedMapConfig.CompletionConfig.failureCount(0).toleratedFailureCount());
+    }
+
+    @Test
+    void failurePercentage_setsPercentage() {
+        var config = DistributedMapConfig.CompletionConfig.failurePercentage(25);
+
+        assertNull(config.toleratedFailureCount());
+        assertEquals(25, config.toleratedFailurePercentage());
+        assertNull(config.minimumSampleSize());
+    }
+
+    @Test
+    void failurePercentage_withMinimumSampleSize_setsBoth() {
+        var config = DistributedMapConfig.CompletionConfig.failurePercentage(25, 10);
+
+        assertEquals(25, config.toleratedFailurePercentage());
+        assertEquals(10, config.minimumSampleSize());
+    }
+
+    @Test
+    void failurePercentage_atBoundaries_shouldPass() {
+        assertEquals(
+                0, DistributedMapConfig.CompletionConfig.failurePercentage(0).toleratedFailurePercentage());
+        assertEquals(
+                100,
+                DistributedMapConfig.CompletionConfig.failurePercentage(100).toleratedFailurePercentage());
+    }
+
+    @Test
+    void countAndPercentage_mutuallyExclusive_shouldThrow() {
+        var exception = assertThrows(
+                IllegalArgumentException.class, () -> new DistributedMapConfig.CompletionConfig(3, 25, null));
+        assertEquals(
+                "toleratedFailureCount and toleratedFailurePercentage are mutually exclusive", exception.getMessage());
+    }
+
+    @Test
+    void minimumSampleSize_withoutPercentage_shouldThrow() {
+        var exception = assertThrows(
+                IllegalArgumentException.class, () -> new DistributedMapConfig.CompletionConfig(3, null, 5));
+        assertEquals("minimumSampleSize is only valid with toleratedFailurePercentage", exception.getMessage());
+    }
+
+    @Test
+    void failureCount_negative_shouldThrow() {
+        var exception = assertThrows(
+                IllegalArgumentException.class, () -> DistributedMapConfig.CompletionConfig.failureCount(-1));
+        assertEquals("toleratedFailureCount must be non-negative, got: -1", exception.getMessage());
+    }
+
+    @Test
+    void failurePercentage_negative_shouldThrow() {
+        var exception = assertThrows(
+                IllegalArgumentException.class, () -> DistributedMapConfig.CompletionConfig.failurePercentage(-1));
+        assertEquals("toleratedFailurePercentage must be between 0 and 100, got: -1", exception.getMessage());
+    }
+
+    @Test
+    void failurePercentage_aboveHundred_shouldThrow() {
+        var exception = assertThrows(
+                IllegalArgumentException.class, () -> DistributedMapConfig.CompletionConfig.failurePercentage(101));
+        assertEquals("toleratedFailurePercentage must be between 0 and 100, got: 101", exception.getMessage());
+    }
+
+    @Test
+    void minimumSampleSize_belowOne_shouldThrow() {
+        var exception = assertThrows(
+                IllegalArgumentException.class, () -> DistributedMapConfig.CompletionConfig.failurePercentage(25, 0));
+        assertEquals("minimumSampleSize must be at least 1, got: 0", exception.getMessage());
+    }
+}
