@@ -20,6 +20,7 @@ import software.amazon.lambda.durable.DurableConfig;
 import software.amazon.lambda.durable.DurableContext;
 import software.amazon.lambda.durable.TypeToken;
 import software.amazon.lambda.durable.context.DurableContextImpl;
+import software.amazon.lambda.durable.dmap.ProcessorEvent;
 import software.amazon.lambda.durable.exception.DurableOperationException;
 import software.amazon.lambda.durable.exception.IllegalDurableOperationException;
 import software.amazon.lambda.durable.exception.UnrecoverableDurableExecutionException;
@@ -31,6 +32,7 @@ import software.amazon.lambda.durable.plugin.InvocationInfo;
 import software.amazon.lambda.durable.plugin.InvocationStatus;
 import software.amazon.lambda.durable.plugin.PluginInfoConverter;
 import software.amazon.lambda.durable.plugin.PluginRunner;
+import software.amazon.lambda.durable.serde.JacksonSerDes;
 import software.amazon.lambda.durable.serde.SerDes;
 import software.amazon.lambda.durable.util.ExceptionHelper;
 
@@ -46,6 +48,7 @@ public class DurableExecutor {
 
     // Lambda response size limit is 6MB minus small epsilon for envelope
     private static final int LAMBDA_RESPONSE_SIZE_LIMIT = 6 * 1024 * 1024 - 50;
+    private static final SerDes JSON = new JacksonSerDes();
 
     private DurableExecutor() {}
 
@@ -56,6 +59,9 @@ public class DurableExecutor {
             BiFunction<I, DurableContext, O> handler,
             DurableConfig config) {
         var pluginRunner = config.getPluginRunner();
+        // A distributed map processor's input and result have a format the service defines, so a customer's SerDes
+        // must not change them. Durable operations inside the processor still use the config's SerDes.
+        var invocationSerDes = inputType.getType() == ProcessorEvent.class ? JSON : config.getSerDes();
         try (var executionManager = new ExecutionManager(input, config, lambdaContext)) {
             var isFirstInvocation = !executionManager.isReplaying();
             var requestId = lambdaContext != null ? lambdaContext.getAwsRequestId() : null;
@@ -78,7 +84,7 @@ public class DurableExecutor {
                         Throwable inputFailure = null;
                         try {
                             userInput = extractUserInput(
-                                    executionManager.getExecutionOperation(), config.getSerDes(), inputType);
+                                    executionManager.getExecutionOperation(), invocationSerDes, inputType);
                         } catch (Throwable t) {
                             inputFailure = t;
                         }
@@ -171,11 +177,11 @@ public class DurableExecutor {
                                         cause,
                                         pluginExecutionInput.get(),
                                         null);
-                                return DurableExecutionOutput.failure(buildErrorObject(cause, config.getSerDes()));
+                                return DurableExecutionOutput.failure(buildErrorObject(cause, invocationSerDes));
                             }
                             // user handler complete successfully
                             logger.debug("Execution completed");
-                            var outputPayload = config.getSerDes().serialize(result);
+                            var outputPayload = invocationSerDes.serialize(result);
                             var output =
                                     DurableExecutionOutput.success(handleLargePayload(executionManager, outputPayload));
                             fireOnInvocationEnd(
