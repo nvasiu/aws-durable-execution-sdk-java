@@ -5,11 +5,13 @@ package software.amazon.lambda.durable;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
-import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.UUID;
 import software.amazon.awssdk.services.lambda.model.*;
 import software.amazon.lambda.durable.client.DurableExecutionClient;
+import software.amazon.lambda.durable.context.DurableContextImpl;
+import software.amazon.lambda.durable.execution.ExecutionManager;
 import software.amazon.lambda.durable.execution.OperationIdGenerator;
 
 public class TestUtils {
@@ -18,7 +20,8 @@ public class TestUtils {
         var client = mock(DurableExecutionClient.class);
         when(client.checkpoint(any(), any(), any())).thenAnswer(invocation -> {
             var updates = (List<OperationUpdate>) invocation.getArgument(2);
-            var responseOperations = new ArrayList<Operation>();
+            // A checkpoint returns the latest state of each operation, not one entry per update.
+            var responseOperations = new LinkedHashMap<String, Operation>();
 
             if (updates != null) {
                 for (var update : updates) {
@@ -52,14 +55,14 @@ public class TestUtils {
                             opBuilder.contextDetails(contexDetail.build());
                         }
                     }
-                    responseOperations.add(opBuilder.build());
+                    responseOperations.put(update.id(), opBuilder.build());
                 }
             }
 
             return CheckpointDurableExecutionResponse.builder()
                     .checkpointToken("new-token")
                     .newExecutionState(CheckpointUpdatedExecutionState.builder()
-                            .operations(responseOperations)
+                            .operations(responseOperations.values())
                             .build())
                     .build();
         });
@@ -68,5 +71,15 @@ public class TestUtils {
 
     public static String hashOperationId(String rawId) {
         return OperationIdGenerator.hashOperationId(rawId);
+    }
+
+    /** Makes a mocked ExecutionManager execute operation tasks like the real manager. */
+    public static void executeOperationTasks(ExecutionManager manager, DurableContextImpl context) {
+        doAnswer(invocation -> {
+                    context.getDurableConfig().getExecutorService().execute(invocation.getArgument(1));
+                    return null;
+                })
+                .when(manager)
+                .executeOperationTask(any(), any(), any());
     }
 }

@@ -4,8 +4,10 @@ package software.amazon.lambda.durable.otel;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static software.amazon.lambda.durable.otel.Invocations.started;
 
 import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.common.Attributes;
@@ -27,6 +29,8 @@ import java.util.function.BiFunction;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.lambda.durable.plugin.InvocationEndInfo;
 import software.amazon.lambda.durable.plugin.InvocationInfo;
 import software.amazon.lambda.durable.plugin.InvocationStatus;
@@ -60,6 +64,74 @@ class DurableSamplerTest {
         DeterministicIdGenerator.clearSharedStateForTest();
         DurableSamplingDecision.clearSharedStateForTest();
         OtelPluginAutoConfigurationState.resetInstalledForTest();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"trace", "span", "execution"})
+    void propagationObservationRejectsAnotherSpan(String mismatch) {
+        var sampler = DurableSampler.wrap(Sampler.alwaysOff());
+        OtelPluginAutoConfigurationState.recordConfiguredSampler(sampler);
+        var intent = DurableSamplingDecision.Intent.resolved(SamplingResult.recordOnly());
+        try (var observation = DurableSamplingDecision.observe(intent, TRACE_ID, "Invocation", ARN)) {
+            var result = sampler.shouldSample(
+                    Context.root(),
+                    mismatch.equals("trace") ? "b".repeat(32) : TRACE_ID,
+                    mismatch.equals("span") ? "another-span" : "Invocation",
+                    SpanKind.INTERNAL,
+                    Attributes.of(SpanAttributes.DURABLE_EXECUTION_ARN, mismatch.equals("execution") ? "other" : ARN),
+                    List.of());
+            assertEquals(SamplingDecision.RECORD_ONLY, result.getDecision());
+            assertFalse(observation.wasConsumed());
+        }
+        assertNull(DurableSamplingDecision.consume(Context.root()));
+    }
+
+    @Test
+    void propagationObservationRestoresNestedScopesAndDoesNotLeak() {
+        var sampler = DurableSampler.wrap(Sampler.alwaysOff());
+        OtelPluginAutoConfigurationState.recordConfiguredSampler(sampler);
+        var intent = DurableSamplingDecision.Intent.resolved(SamplingResult.recordAndSample());
+        var attributes = Attributes.of(SpanAttributes.DURABLE_EXECUTION_ARN, ARN);
+        try (var outer = DurableSamplingDecision.observe(intent, TRACE_ID, "Invocation", ARN)) {
+            try (var inner = DurableSamplingDecision.observe(intent, TRACE_ID, "Workflow", ARN)) {
+                sampler.shouldSample(Context.root(), TRACE_ID, "Workflow", SpanKind.INTERNAL, attributes, List.of());
+                assertTrue(inner.wasConsumed());
+                assertFalse(outer.wasConsumed());
+            }
+            assertFalse(outer.wasConsumed());
+            sampler.shouldSample(Context.root(), TRACE_ID, "Invocation", SpanKind.INTERNAL, attributes, List.of());
+            assertTrue(outer.wasConsumed());
+        }
+        try (var next = DurableSamplingDecision.observe(intent, TRACE_ID, "Invocation", ARN)) {
+            assertFalse(next.wasConsumed());
+        }
+        assertNull(DurableSamplingDecision.consume(Context.root()));
+    }
+
+    @Test
+    void consumingContextIntentAlsoClearsCrossLoaderFallback() {
+        var delegate = new CountingSampler(Sampler.alwaysOff());
+        var sampler = DurableSampler.wrap(delegate);
+        var parent = DurableSamplingDecision.store(
+                Context.root(), DurableSamplingDecision.Intent.resolved(SamplingResult.recordOnly()));
+        try (var ignored = DurableSamplingDecision.openScope(
+                DurableSamplingDecision.Intent.resolved(SamplingResult.recordAndSample()))) {
+            assertEquals(
+                    SamplingDecision.RECORD_ONLY,
+                    sampler.shouldSample(parent, TRACE_ID, "durable", SpanKind.INTERNAL, Attributes.empty(), List.of())
+                            .getDecision());
+            assertEquals(
+                    SamplingDecision.DROP,
+                    sampler.shouldSample(
+                                    Context.root(),
+                                    TRACE_ID,
+                                    "callback",
+                                    SpanKind.INTERNAL,
+                                    Attributes.empty(),
+                                    List.of())
+                            .getDecision());
+            assertEquals(1, delegate.count(), "The unrelated callback must use its own sampler");
+        }
     }
 
     // ─── Unit tests for the wrapper ──────────────────────────────────────
@@ -124,9 +196,10 @@ class DurableSamplerTest {
         // A stateful/quota delegate must be consulted once per execution (trace ID), not per durable span.
         var delegate = new CountingSampler(Sampler.alwaysOn());
         var sampler = DurableSampler.wrap(delegate);
-        var parent = DurableSamplingDecision.store(Context.root(), DurableSamplingDecision.Intent.deferred(TRACE_ID));
-
         for (var i = 0; i < 4; i++) {
+            // Each SDK-owned span receives its own one-shot carrier, while the resolved decision stays execution-wide.
+            var parent =
+                    DurableSamplingDecision.store(Context.root(), DurableSamplingDecision.Intent.deferred(TRACE_ID));
             sampler.shouldSample(parent, TRACE_ID, "op" + i, SpanKind.INTERNAL, Attributes.empty(), List.of());
         }
 
@@ -172,7 +245,7 @@ class DurableSamplerTest {
     void configuredSampler_isEvaluatedAtMostOncePerInvocation() {
         var delegate = new CountingSampler(Sampler.alwaysOn());
         var exporter = InMemorySpanExporter.create();
-        var plugin = new InvocationOtelPlugin(
+        var pluginFactory = InvocationOtelPlugin.factory(
                 SdkTracerProvider.builder().setSampler(delegate).addSpanProcessor(SimpleSpanProcessor.create(exporter)),
                 OtelPluginConfig.builder()
                         .contextExtractor(() -> null)
@@ -180,7 +253,7 @@ class DurableSamplerTest {
                         .build());
 
         // A full invocation with a Workflow span, Invocation span, operation span, and attempt span.
-        plugin.onInvocationStart(new InvocationInfo("req-1", ARN, true, Instant.now()));
+        var plugin = started(pluginFactory, new InvocationInfo("req-1", ARN, true, Instant.now()));
         plugin.onOperationStart(
                 new OperationInfo("op-1", "step", "STEP", "Step", null, Instant.now(), null, null, false));
         plugin.onUserFunctionStart(
@@ -226,7 +299,7 @@ class DurableSamplerTest {
     private InMemorySpanExporter exportedWith(Sampler configuredSampler, ExtractedContext.Sampling sampling) {
         var exporter = InMemorySpanExporter.create();
         var extracted = new ExtractedContext(TRACE_ID, SPAN_ID, sampling);
-        var plugin = new InvocationOtelPlugin(
+        var pluginFactory = InvocationOtelPlugin.factory(
                 SdkTracerProvider.builder()
                         .setSampler(configuredSampler)
                         .addSpanProcessor(SimpleSpanProcessor.create(exporter)),
@@ -235,7 +308,7 @@ class DurableSamplerTest {
                         .enableMdc(false)
                         .build());
 
-        plugin.onInvocationStart(new InvocationInfo("req-1", ARN, true, Instant.now()));
+        var plugin = started(pluginFactory, new InvocationInfo("req-1", ARN, true, Instant.now()));
         plugin.onInvocationEnd(new InvocationEndInfo("req-1", ARN, true, InvocationStatus.SUCCEEDED, null));
         return exporter;
     }

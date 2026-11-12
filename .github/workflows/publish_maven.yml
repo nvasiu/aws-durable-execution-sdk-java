@@ -58,7 +58,7 @@ jobs:
           fi
 
       - name: Setup Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           java-version: '17'
           distribution: 'corretto'
@@ -72,6 +72,9 @@ jobs:
             echo "Release tag $RELEASE_TAG points to Maven version $pom_version, expected $RELEASE_VERSION." >&2
             exit 1
           fi
+
+      - name: Set release build timestamp
+        run: bash .github/scripts/set_release_timestamp.sh
 
       - name: Build artifacts
         run: mvn clean install -q -Dlog4j2.level=WARN -Dlog4j.configurationFile=log4j2-quiet.xml --no-transfer-progress
@@ -92,7 +95,18 @@ jobs:
             "sdk/target/aws-durable-execution-sdk-java-${RELEASE_VERSION}.jar" \
             "sdk-testing/target/aws-durable-execution-sdk-java-testing-${RELEASE_VERSION}.jar" \
             "otel-plugin/target/aws-durable-execution-sdk-java-plugin-otel-${RELEASE_VERSION}.jar" \
+            "telemetry-exporter/target/aws-durable-execution-sdk-java-plugin-telemetry-exporter-${RELEASE_VERSION}.jar" \
             --clobber
+
+      # Packaged after the JARs are attached so that a bundling failure cannot
+      # withhold the release assets that the JAR upload above already published.
+      - name: Package Maven release bundles
+        run: python3 .github/scripts/package_release_bundles.py "$RELEASE_VERSION" release-bundles
+
+      - name: Upload GitHub release bundles
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$RELEASE_TAG" release-bundles/*-bundle.zip --clobber
 
       - name: Checkout default branch
         uses: actions/checkout@v7

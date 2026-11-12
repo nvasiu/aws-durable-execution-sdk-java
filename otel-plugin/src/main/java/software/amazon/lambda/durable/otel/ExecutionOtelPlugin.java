@@ -21,10 +21,13 @@ import io.opentelemetry.sdk.trace.SdkTracerProviderBuilder;
 import java.time.Instant;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import software.amazon.lambda.durable.plugin.DurableExecutionPlugin;
+import software.amazon.lambda.durable.plugin.DurableExecutionPluginFactory;
+import software.amazon.lambda.durable.plugin.HandlerScoped;
 import software.amazon.lambda.durable.plugin.InvocationEndInfo;
 import software.amazon.lambda.durable.plugin.InvocationInfo;
 import software.amazon.lambda.durable.plugin.OperationEndInfo;
@@ -62,10 +65,21 @@ import software.amazon.lambda.durable.plugin.UserFunctionStartInfo;
  *
  * <p>The Workflow and Invocation spans share one execution trace, anchored at the execution ancestor resolved at
  * invocation start: a valid propagated remote server span becomes that ancestor directly, otherwise a synthetic
- * execution root anchors the trace. The trace ID is stable across invocations of the same execution. When using
- * {@link #ExecutionOtelPlugin()}, the plugin resolves the global provider at invocation start. If the OpenTelemetry
- * Java agent is not initialized yet, telemetry is disabled for that entire invocation and provider resolution is
- * retried on the next invocation.
+ * execution root anchors the trace. The trace ID is stable across invocations of the same execution, because it is
+ * derived from the execution ARN and start time rather than carried in the plugin.
+ *
+ * <p><b>Lifetime.</b> One instance serves exactly one Lambda invocation: {@link #factory()} and its overloads return a
+ * {@link DurableExecutionPluginFactory} that the SDK calls once per invocation. Invocation-level references are
+ * released at return; an unfinished operation retains its matching cleanup until its owner unwinds. Everything about
+ * the invocation — the execution ARN, the resolved execution trace and ancestor, the sampling intent, the Invocation
+ * span, the deferred Workflow span context — is therefore a {@code final} field, resolved in the constructor from the
+ * {@link InvocationInfo} the factory receives. Nothing is reset between invocations because nothing is carried between
+ * them.
+ *
+ * <p>What belongs to the execution environment stays in the factory's {@link OtelPluginEnvironment}: the configuration,
+ * the ID generator, and either the application-owned tracer provider (built once) or the lazily resolved ADOT global
+ * provider. An invocation whose instance cannot resolve the global provider emits no telemetry at all, and the next
+ * invocation's instance resolves it again.
  *
  * <p>Status mapping (parity with the Python/JS references):
  *
@@ -85,47 +99,68 @@ import software.amazon.lambda.durable.plugin.UserFunctionStartInfo;
  * current, so {@code Span.current()} enrichment is not recorded on the final operation span. The placeholder uses the
  * Invocation span's resolved sampling metadata when available.
  *
- * <p>Thread-safe: uses {@link ConcurrentHashMap} for span/scope storage since the SDK runs user code on multiple
- * threads.
+ * <p>Thread-safe within its invocation: the SDK runs user code on multiple threads, so the open-span registries are
+ * {@link ConcurrentHashMap}s. The invocation's identity needs no such protection — it is final state written before the
+ * SDK publishes the instance to those threads.
  */
-public class ExecutionOtelPlugin implements DurableExecutionPlugin {
+@HandlerScoped(ExecutionOtelPlugin.HandlerScopeOpener.class)
+public final class ExecutionOtelPlugin implements DurableExecutionPlugin {
 
     private static final Logger logger = LoggerFactory.getLogger(ExecutionOtelPlugin.class);
 
-    private volatile SdkTracerProvider sdkTracerProvider;
-    private volatile Tracer tracer;
+    // ─── Environment lifetime (shared with every other invocation's instance) ─────────────
+
     private final DeterministicIdGenerator idGenerator;
-    private final ContextExtractor contextExtractor;
     private final boolean enableMdc;
     private final String workflowSpanName;
-    private final String instrumentationName;
 
-    // Per-invocation state
-    private volatile boolean tracingEnabled;
-    private volatile Span invocationSpan;
-    private volatile String durableExecutionArn;
+    // ─── This invocation, all resolved in the constructor from its InvocationInfo ─────────
 
-    // Trace ID and flags of the execution trace, published together as one snapshot so readers never pair a trace ID
-    // with mismatched flags.
-    private volatile ExecutionTrace executionTrace;
-    // The execution's single sampling intent for this invocation, computed once at onInvocationStart and attached to
-    // every durable span's parent context so DurableSampler applies it (a resolved decision verbatim, or a deferral to
-    // its own delegate) without re-invoking the configured sampler per span.
-    private volatile DurableSamplingDecision.Intent samplingIntent;
+    /** The provider used to flush before Lambda freezes; null when it is not visible to the application. */
+    private final SdkTracerProvider sdkTracerProvider;
 
-    /** Immutable snapshot of the resolved execution trace, read atomically through a single volatile reference. */
+    /** Null when telemetry is disabled for this invocation, which makes every hook on this instance a no-op. */
+    private final Tracer tracer;
+
+    private final String durableExecutionArn;
+    private final Instant executionStartTime;
+
+    /** Trace ID and flags of the execution trace, resolved together so they can never be paired mismatched. */
+    private final ExecutionTrace executionTrace;
+
+    /**
+     * The execution's single sampling intent for this invocation, resolved once and attached to every durable span's
+     * parent context so DurableSampler applies it (a resolved decision verbatim, or a deferral to its own delegate)
+     * without re-invoking the configured sampler per span.
+     */
+    private final DurableSamplingDecision.Intent samplingIntent;
+
+    private final Span invocationSpan;
+    private final boolean invocationUsesDurableSampler;
+    private final Span executionRootSpan;
+
+    /**
+     * The Workflow span exists as a deterministic context that operations parent onto; the recording span is started
+     * and ended in a single call on the terminal invocation, so it is never left open. The execution ancestor and start
+     * time are held so that span can be built at invocation end.
+     */
+    private final SpanContext workflowSpanContext;
+
+    private final SpanContext executionAncestor;
+
+    /**
+     * Set when this invocation ends; never cleared, because an instance is never reused. Read by the operation and user
+     * function hooks, which may run on other threads of this invocation, so that a straggler hook arriving after the
+     * spans have been ended does not open a new one — volatile for that publication.
+     */
+    private volatile boolean ended;
+
+    /** Immutable snapshot of the resolved execution trace. */
     private record ExecutionTrace(String traceId, TraceFlags flags) {}
-
-    // Between invocations the Workflow span exists only as a deterministic context that operations parent onto; the
-    // recording span is started and ended in a single call on the terminal invocation, so it is never left open. The
-    // execution ancestor and start time are retained so that span can be built at invocation end.
-    private volatile SpanContext workflowSpanContext;
-    private volatile SpanContext executionAncestor;
-    private volatile Instant executionStartTime;
 
     // Thread-safe storage for attempt spans/scopes (keyed by operationId + "-" + attempt)
     private final ConcurrentHashMap<String, Span> attemptSpans = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, Scope> attemptScopes = new ConcurrentHashMap<>();
+    private final UserFunctionScopes attemptScopes = new UserFunctionScopes();
 
     // Deterministic operation contexts (keyed by operationId), held between start and end so children and attempts can
     // parent onto an operation whose recording span is not created until onOperationEnd.
@@ -136,89 +171,129 @@ public class ExecutionOtelPlugin implements DurableExecutionPlugin {
     private final ConcurrentHashMap<String, Instant> operationStartTimes = new ConcurrentHashMap<>();
 
     /**
-     * Creates a Workflow-rooted OTel plugin with default settings: X-Ray context extraction, MDC enabled, root span
-     * named {@code "Workflow"}.
-     *
-     * <p>Uses the provided tracer provider builder. For ADOT Java agent usage, prefer {@link #ExecutionOtelPlugin()}
-     * with the plugin jar configured through {@code OTEL_JAVAAGENT_EXTENSIONS}.
-     *
-     * @param tracerProviderBuilder the tracer provider builder (its ID generator will be wrapped)
-     */
-    public ExecutionOtelPlugin(SdkTracerProviderBuilder tracerProviderBuilder) {
-        this(tracerProviderBuilder, OtelPluginConfig.defaults());
-    }
-
-    /**
-     * Creates a Workflow-rooted OTel plugin with default settings: X-Ray context extraction and MDC enabled.
-     *
-     * <p>Resolves {@code GlobalOpenTelemetry} at invocation start. If the ADOT Java agent has not initialized it yet,
-     * telemetry is disabled for that invocation and resolution is retried on the next invocation.
-     */
-    public ExecutionOtelPlugin() {
-        this(OtelPluginConfig.defaults());
-    }
-
-    /**
-     * Creates a Workflow-rooted OTel plugin from the given tracer provider builder and configuration.
-     *
-     * <p>Customers configure exporters and span processors on the builder; all other tunables (context extractor, MDC
-     * toggle, Workflow span name, instrumentation scope name) come from {@link OtelPluginConfig}. Use
-     * {@link OtelPluginConfig#builder()} for readable, named configuration:
+     * Returns a factory that creates one plugin instance per invocation against the ADOT Java agent's global provider,
+     * with default settings: X-Ray context extraction, MDC enabled, root span named {@code "Workflow"}.
      *
      * <pre>{@code
-     * var plugin = new ExecutionOtelPlugin(
+     * DurableConfig.builder().withPlugins(ExecutionOtelPlugin.factory()).build();
+     * }</pre>
+     *
+     * @return the per-invocation plugin factory to hand to {@code DurableConfig.Builder.withPlugins}
+     */
+    public static DurableExecutionPluginFactory factory() {
+        return factory(OtelPluginConfig.defaults());
+    }
+
+    /**
+     * Returns a factory that creates one plugin instance per invocation against the ADOT Java agent's global provider.
+     *
+     * <p>The global provider is resolved when the first invocation's instance needs it. If the agent has not
+     * initialized it yet, that invocation emits no telemetry and the next invocation's instance resolves it again.
+     *
+     * @param config the plugin configuration
+     * @return the per-invocation plugin factory to hand to {@code DurableConfig.Builder.withPlugins}
+     */
+    public static DurableExecutionPluginFactory factory(OtelPluginConfig config) {
+        var environment = OtelPluginEnvironment.forGlobalProvider(config);
+        return invocationFactory(environment);
+    }
+
+    /**
+     * Returns a factory that creates one plugin instance per invocation against an application-owned tracer provider,
+     * with default settings: X-Ray context extraction, MDC enabled, root span named {@code "Workflow"}.
+     *
+     * <p>Customers configure exporters and span processors on the builder — the plugin handles ID generation. The
+     * provider is built once, here, and shared by every invocation's instance.
+     *
+     * @param tracerProviderBuilder the tracer provider builder (its ID generator and sampler will be wrapped)
+     * @return the per-invocation plugin factory to hand to {@code DurableConfig.Builder.withPlugins}
+     */
+    public static DurableExecutionPluginFactory factory(SdkTracerProviderBuilder tracerProviderBuilder) {
+        return factory(tracerProviderBuilder, OtelPluginConfig.defaults());
+    }
+
+    /**
+     * Returns a factory that creates one plugin instance per invocation against an application-owned tracer provider.
+     *
+     * <p>Customers configure exporters and span processors on the builder; all other tunables (context extractor, MDC
+     * toggle, Workflow span name, instrumentation scope name) come from {@link OtelPluginConfig}:
+     *
+     * <pre>{@code
+     * var factory = ExecutionOtelPlugin.factory(
      *     SdkTracerProvider.builder().addSpanProcessor(SimpleSpanProcessor.create(exporter)),
      *     OtelPluginConfig.builder().enableMdc(false).workflowSpanName("Workflow").build());
      * }</pre>
      *
-     * @param tracerProviderBuilder the tracer provider builder (its ID generator will be wrapped)
+     * @param tracerProviderBuilder the tracer provider builder (its ID generator and sampler will be wrapped)
      * @param config the plugin configuration
+     * @return the per-invocation plugin factory to hand to {@code DurableConfig.Builder.withPlugins}
      */
-    public ExecutionOtelPlugin(SdkTracerProviderBuilder tracerProviderBuilder, OtelPluginConfig config) {
-        this.idGenerator = DeterministicIdGenerator.installOn(tracerProviderBuilder);
-        // Wrap the configured sampler so durable spans use the execution's single precomputed decision.
-        DurableSampler.installOn(tracerProviderBuilder);
+    public static DurableExecutionPluginFactory factory(
+            SdkTracerProviderBuilder tracerProviderBuilder, OtelPluginConfig config) {
+        var environment = OtelPluginEnvironment.forProviderBuilder(tracerProviderBuilder, config);
+        return invocationFactory(environment);
+    }
 
-        this.sdkTracerProvider = tracerProviderBuilder.build();
-        this.tracer = sdkTracerProvider.get(config.instrumentationName());
-        this.contextExtractor = config.contextExtractor();
-        this.enableMdc = config.enableMdc();
-        this.workflowSpanName = config.workflowSpanName();
-        this.instrumentationName = config.instrumentationName();
+    private static DurableExecutionPluginFactory invocationFactory(OtelPluginEnvironment environment) {
+        return new DurableExecutionPluginFactory() {
+            @Override
+            public String getExclusiveGroup() {
+                return "durable-otel-view";
+            }
+
+            @Override
+            public String toString() {
+                return "ExecutionOtelPlugin";
+            }
+
+            @Override
+            public DurableExecutionPlugin createPlugin(InvocationInfo info) {
+                return environment.createPlugin(() -> new ExecutionOtelPlugin(environment, info));
+            }
+        };
     }
 
     /**
-     * Creates a Workflow-rooted OTel plugin from configuration alone (no caller-supplied tracer provider builder).
+     * Creates the instance that serves one invocation.
      *
-     * <p>The config-only constructor uses the ADOT/global provider. Supply a {@code SdkTracerProviderBuilder} via the
-     * two-arg constructor for an application-owned provider.
+     * <p>Everything this invocation's spans are keyed by is resolved here, from the {@code info} the factory received:
+     * the tracer binding, the extracted context, the canonical execution trace and its ancestor, the single sampling
+     * intent, the Invocation span, and the deferred Workflow span context. Resolving them in the constructor — before
+     * the SDK publishes this instance to the operation and user function threads — is what lets them be {@code final}
+     * rather than volatile per-invocation state.
      *
-     * @param config the plugin configuration
+     * <p>When the tracer cannot be bound, telemetry is disabled for this invocation: the span fields stay null and
+     * every hook returns immediately. The next invocation gets a new instance, which binds again.
      */
-    public ExecutionOtelPlugin(OtelPluginConfig config) {
-        this.contextExtractor = config.contextExtractor();
+    private ExecutionOtelPlugin(OtelPluginEnvironment environment, InvocationInfo info) {
+        var config = environment.config();
+        this.idGenerator = environment.idGenerator();
         this.enableMdc = config.enableMdc();
         this.workflowSpanName = config.workflowSpanName();
-        this.instrumentationName = config.instrumentationName();
-        this.idGenerator = OtelPluginSupport.createDefaultIdGenerator();
-    }
+        this.durableExecutionArn = info.durableExecutionArn();
+        this.executionStartTime = info.executionStartTime();
 
-    // ─── Invocation hooks ────────────────────────────────────────────────
-
-    @Override
-    public void onInvocationStart(InvocationInfo info) {
-        tracingEnabled = false;
-        if (!bindTracer()) {
+        var setup = environment.bind("ExecutionOtelPlugin");
+        if (setup == null) {
+            this.sdkTracerProvider = null;
+            this.tracer = null;
+            this.samplingIntent = null;
+            this.executionTrace = null;
+            this.executionAncestor = null;
+            this.invocationSpan = null;
+            this.invocationUsesDurableSampler = false;
+            this.executionRootSpan = null;
+            this.workflowSpanContext = null;
             return;
         }
-
-        this.durableExecutionArn = info.durableExecutionArn();
+        this.sdkTracerProvider = setup.sdkTracerProvider();
+        this.tracer = setup.tracer();
 
         // Resolve the one execution ancestor both spans parent onto, so they share a stable-per-execution trace and a
         // sampling decision.
-        var extracted = contextExtractor.extract();
+        var extracted = config.contextExtractor().extract(info);
         var canonicalTraceId =
-                ExecutionTraceContext.canonicalTraceId(extracted, arn(), info.executionStartTime(), idGenerator);
+                ExecutionTraceContext.canonicalTraceId(extracted, arn(), executionStartTime, idGenerator);
         // Resolve the execution's sampling decision once for this invocation as a full SamplingResult, then apply it to
         // every durable span via DurableSampler. The execution ancestor's trace flags are derived from the same
         // decision so a parent-based sampler stays consistent with it.
@@ -229,16 +304,33 @@ public class ExecutionOtelPlugin implements DurableExecutionPlugin {
                 canonicalTraceId,
                 workflowSpanName,
                 Attributes.of(DURABLE_EXECUTION_ARN, arn()));
-        // A null decision is unresolved on the agent path: defer to DurableSampler's own delegate (keyed by trace ID),
-        // rather than fabricating a decision that would bypass an installed drop/rate-limit policy.
-        samplingIntent = decision != null
+        // An unresolved decision is supplied by the actual fallback root or the agent-side sampler. Do not invent
+        // a decision that bypasses an installed drop/rate-limit policy.
+        this.samplingIntent = decision != null
                 ? DurableSamplingDecision.Intent.resolved(decision)
                 : DurableSamplingDecision.Intent.deferred(canonicalTraceId);
         var sampled = OtelPluginSupport.isSampled(decision);
         var execCtx = ExecutionTraceContext.resolve(extracted, canonicalTraceId, arn(), idGenerator, () -> sampled);
-        executionTrace = new ExecutionTrace(canonicalTraceId, execCtx.traceFlags());
-        executionAncestor = execCtx.executionAncestor();
-        executionStartTime = info.executionStartTime();
+        // Materialize and immediately end the SDK-owned anchor before creating descendants or user code.
+        var root = DurableExecutionRoot.start(
+                tracer,
+                idGenerator,
+                execCtx.executionAncestor(),
+                durableExecutionArn,
+                executionStartTime,
+                samplingIntent,
+                OtelPluginSupport.usesLocalDurableSampler(sdkTracerProvider),
+                OtelPluginSupport.usesDurableSamplingBridge(sdkTracerProvider));
+        DurableExecutionRoot.end(root, executionStartTime);
+        this.executionRootSpan = root;
+        // An unresolved plain fallback uses the real root's decision; explicit/ambient decisions and the
+        // legacy remote-parent path retain their existing behavior. Plain samplers still own each child decision.
+        if (executionRootSpan != null
+                && (OtelPluginSupport.usesDurableSamplingBridge(sdkTracerProvider) || decision == null)) {
+            execCtx = new ExecutionTraceContext(executionRootSpan.getSpanContext());
+        }
+        this.executionTrace = new ExecutionTrace(canonicalTraceId, execCtx.traceFlags());
+        this.executionAncestor = execCtx.executionAncestor();
 
         // Invocation span — child of the ambient Lambda span when it is on the execution trace, otherwise a child of
         // the execution ancestor so it stays within the same trace.
@@ -246,69 +338,103 @@ public class ExecutionOtelPlugin implements DurableExecutionPlugin {
         var spanBuilder = tracer.spanBuilder("Invocation")
                 .setSpanKind(SpanKind.INTERNAL)
                 .setParent(invocationParent)
-                .setAttribute(DURABLE_EXECUTION_ARN, info.durableExecutionArn())
+                .setAttribute(DURABLE_EXECUTION_ARN, durableExecutionArn)
                 .setAttribute(DURABLE_FIRST_INVOCATION, info.isFirstInvocation());
 
         if (info.requestId() != null) {
             spanBuilder.setAttribute(AttributeKey.stringKey("faas.invocation_id"), info.requestId());
         }
 
-        invocationSpan = startDurableSpan(spanBuilder);
+        if (OtelPluginSupport.usesDurableSamplingBridge(sdkTracerProvider)) {
+            try (var observation = DurableSamplingDecision.observe(
+                    samplingIntent, canonicalTraceId, "Invocation", durableExecutionArn)) {
+                this.invocationSpan = spanBuilder.startSpan();
+                this.invocationUsesDurableSampler = observation.wasConsumed();
+            }
+        } else {
+            this.invocationSpan = spanBuilder.startSpan();
+            this.invocationUsesDurableSampler = false;
+        }
 
         // Defer the recording Workflow span until terminal completion. The placeholder uses the Invocation span's
         // resolved sampling metadata so operation parents/links match the span that is eventually exported.
-        var workflowSpanId = idGenerator.generateWorkflowSpanId(info.durableExecutionArn());
         var invocationContext = invocationSpan.getSpanContext();
-        workflowSpanContext = SpanContext.create(
-                canonicalTraceId, workflowSpanId, invocationContext.getTraceFlags(), invocationContext.getTraceState());
+        this.workflowSpanContext = SpanContext.create(
+                canonicalTraceId,
+                idGenerator.generateWorkflowSpanId(durableExecutionArn),
+                invocationContext.getTraceFlags(),
+                invocationContext.getTraceState());
+    }
 
-        // Inject MDC on the handler thread so handler-level logs (between steps) have trace context.
-        if (enableMdc) {
-            MDC.put(
-                    MdcSpanEnricher.MDC_TRACE_ID,
-                    invocationSpan.getSpanContext().getTraceId());
+    // ─── Invocation hooks ────────────────────────────────────────────────
+
+    @Override
+    public void onInvocationStart(InvocationInfo info) {
+        // This invocation's identity, its Invocation span and its Workflow span context were resolved in the
+        // constructor, from the very InvocationInfo this hook receives. What is left is the MDC injection, which
+        // belongs
+        // here because it must run on the handler thread so handler-level logs between steps carry trace context.
+        if (invocationSpan == null || !enableMdc) {
+            return;
         }
-        tracingEnabled = true;
+        MDC.put(MdcSpanEnricher.MDC_TRACE_ID, invocationSpan.getSpanContext().getTraceId());
+    }
+
+    /** JDK-only scope bridge; does not dispatch to coincidental subclass methods. */
+    public static final class HandlerScopeOpener implements Function<ExecutionOtelPlugin, AutoCloseable> {
+        @Override
+        public AutoCloseable apply(ExecutionOtelPlugin plugin) {
+            return plugin.activateHandlerContext();
+        }
+    }
+
+    private AutoCloseable activateHandlerContext() {
+        var trace = executionTrace;
+        if (ended || tracer == null || trace == null) return null;
+        var ambient = Span.current().getSpanContext();
+        // Preserve a compatible ambient Lambda span. An absent or unrelated ambient span must not leave
+        // handler instrumentation outside the durable execution's canonical trace.
+        if (ambient.isValid() && trace.traceId().equals(ambient.getTraceId())) return Scope.noop();
+        return Span.wrap(workflowSpanContext).makeCurrent();
     }
 
     @Override
     public void onInvocationEnd(InvocationEndInfo info) {
-        if (!tracingEnabled) {
-            return;
-        }
-        tracingEnabled = false;
+        if (ended) return;
+        ended = true;
+        var shouldFlush = invocationSpan != null || executionRootSpan != null;
+        OtelPluginSupport.finishWithRootCleanup(() -> finishInvocationEnd(info), () -> {
+            if (shouldFlush && sdkTracerProvider != null) {
+                var flushResult = sdkTracerProvider.forceFlush().join(5, TimeUnit.SECONDS);
+                if (!flushResult.isSuccess())
+                    logger.warn("OTel span flush failed or timed out — some spans may be lost");
+            }
+        });
+    }
 
+    private void finishInvocationEnd(InvocationEndInfo info) {
+        if (invocationSpan == null) return;
         // Clear invocation-level MDC
         if (enableMdc) {
             MdcSpanEnricher.clear();
         }
 
-        // Drop placeholder state. Open operations have no recording span to abandon.
-        operationContexts.clear();
-        operationStartTimes.clear();
-
-        // Release OTel context on worker threads, then end any attempt spans still open so no recording span is
-        // abandoned. Attempt spans normally start and end within one user-function call, so this is a safeguard.
-        for (var scope : attemptScopes.values()) {
-            scope.close();
-        }
-        attemptScopes.clear();
+        // Close scopes owned by this thread, retaining other owners' scopes until their matching end hooks run.
+        attemptScopes.closeCurrentThread();
         for (var span : attemptSpans.values()) {
             span.end();
         }
-        attemptSpans.clear();
+        // Every attempt span has ended. Only unfinished owners may retain this invocation's instance for scope
+        // cleanup; these registries are never recycled for another invocation.
 
         // End the invocation span every invocation.
-        if (invocationSpan != null) {
-            invocationSpan.setAttribute(
-                    DURABLE_INVOCATION_STATUS, info.invocationStatus().name());
-            applyInvocationStatus(invocationSpan, info);
-            invocationSpan.end();
-            invocationSpan = null;
-        }
+        invocationSpan.setAttribute(
+                DURABLE_INVOCATION_STATUS, info.invocationStatus().name());
+        applyInvocationStatus(invocationSpan, info);
+        invocationSpan.end();
 
         // Materialize the Workflow span only on terminal status.
-        if (isTerminal(info) && workflowSpanContext != null && executionAncestor != null) {
+        if (isTerminal(info)) {
             var workflowSpanBuilder = tracer.spanBuilder(workflowSpanName)
                     .setSpanKind(SpanKind.INTERNAL)
                     .setParent(withDurableDecision(Context.root().with(Span.wrap(executionAncestor))))
@@ -332,25 +458,37 @@ public class ExecutionOtelPlugin implements DurableExecutionPlugin {
             }
             workflowSpan.end();
         }
-        workflowSpanContext = null;
-        executionAncestor = null;
-        executionStartTime = null;
-        samplingIntent = null;
+    }
 
-        // Flush spans before Lambda freezes
-        if (sdkTracerProvider != null) {
-            var flushResult = sdkTracerProvider.forceFlush().join(5, TimeUnit.SECONDS);
-            if (!flushResult.isSuccess()) {
-                logger.warn("OTel span flush failed or timed out — some spans may be lost");
-            }
+    /** Produces metadata without creating spans or changing the configured provider/resource. */
+    @Override
+    public String providePropagationMetadata(
+            String executionArn, String operationId, String parentOperationId, String targetFunctionName) {
+        if (disabled() || !executionArn.equals(durableExecutionArn)) return null;
+        var trace = executionTrace;
+        if (trace == null) return null;
+        // Deferred operation contexts may reuse the invocation's decision only when DurableSampler owns it.
+        // An agent hides its provider, so require a bridge confirmation from its verified final sampler instance.
+        // A replacement sampler can decide differently per span and must continue to abstain here.
+        if (!OtelPluginSupport.usesDurableSamplingBridge(sdkTracerProvider)
+                || (sdkTracerProvider == null && !invocationUsesDurableSampler)) return null;
+        var context = operationContexts.get(operationId);
+        if (context == null) {
+            // Before a new operation starts, use the same deterministic ID its initial span will receive.
+            context = SpanContext.create(
+                    trace.traceId(),
+                    idGenerator.generateSpanIdForOperation(durableExecutionArn, operationId),
+                    effectiveTraceFlags(),
+                    effectiveTraceState());
         }
+        return OtelPropagationMetadata.fromContext(context);
     }
 
     // ─── Operation hooks ─────────────────────────────────────────────────
 
     @Override
     public void onOperationStart(OperationInfo info) {
-        if (!tracingEnabled) return;
+        if (disabled()) return;
         if (info.id() == null) return;
 
         // Retain only a deterministic placeholder. Its flags/state come from the Invocation span's resolved sampling
@@ -368,7 +506,7 @@ public class ExecutionOtelPlugin implements DurableExecutionPlugin {
 
     @Override
     public void onOperationEnd(OperationEndInfo info) {
-        if (!tracingEnabled) return;
+        if (disabled()) return;
         if (info.id() == null) return;
 
         // Start and end the operation's single span here, using its deterministic span ID and linking to the
@@ -390,6 +528,8 @@ public class ExecutionOtelPlugin implements DurableExecutionPlugin {
         // created earlier, at onUserFunctionStart/onOperationStart). onOperationEnd's start timestamp can be a later
         // re-observed value than the start captured at onOperationStart, so take the minimum of the two.
         var startTimestamp = earliest(capturedStart, info.startTimestamp());
+        // Use the known end when no start was observed; retain any existing start even if clocks disagree.
+        if (startTimestamp == null) startTimestamp = info.endTimestamp();
         if (startTimestamp != null) {
             spanBuilder.setStartTimestamp(startTimestamp);
         }
@@ -410,16 +550,7 @@ public class ExecutionOtelPlugin implements DurableExecutionPlugin {
         if (info.attempt() != null) {
             span.setAttribute(DURABLE_ATTEMPT_NUMBER, info.attempt().longValue());
         }
-        if (info.error() != null) {
-            span.setStatus(StatusCode.ERROR, info.error().getMessage());
-            span.recordException(info.error());
-        } else if ("SUCCEEDED".equals(info.status()) || info.status() == null) {
-            // Only stamp OK on genuine success. onOperationEnd fires for every terminal status, and
-            // extractErrorFromOperation returns null for CANCELLED (always) and for FAILED/TIMED_OUT/STOPPED with no
-            // attached error object — those carry a non-null, non-SUCCEEDED status and must stay UNSET. A null status
-            // is a successful statusless virtual (FLAT CONTEXT) operation, which is OK.
-            span.setStatus(StatusCode.OK);
-        }
+        OtelPluginSupport.applyOperationStatus(span, info, info.endTimestamp());
 
         endSpan(span, info.endTimestamp());
     }
@@ -428,7 +559,7 @@ public class ExecutionOtelPlugin implements DurableExecutionPlugin {
 
     @Override
     public void onUserFunctionStart(UserFunctionStartInfo info) {
-        if (!tracingEnabled) return;
+        if (disabled()) return;
 
         // Skip attempt spans for CONTEXT operations — they are a scoping construct, not a retriable unit of work. Still
         // make the operation's context current so auto-instrumented calls become children of the (deferred) operation
@@ -436,7 +567,8 @@ public class ExecutionOtelPlugin implements DurableExecutionPlugin {
         if ("CONTEXT".equals(info.type())) {
             var operationContext = operationContexts.get(info.id());
             if (operationContext != null) {
-                var scope = Span.wrap(operationContext).makeCurrent();
+                var scope = OtelPluginSupport.onOwnerThread(
+                        Span.wrap(operationContext).makeCurrent());
                 var key = attemptKey(info.id(), info.attempt());
                 attemptScopes.put(key, scope);
             }
@@ -476,7 +608,7 @@ public class ExecutionOtelPlugin implements DurableExecutionPlugin {
         attemptSpans.put(key, span);
 
         // Make span current on this thread so auto-instrumented calls become children
-        var scope = span.makeCurrent();
+        var scope = OtelPluginSupport.onOwnerThread(span.makeCurrent());
         attemptScopes.put(key, scope);
 
         if (enableMdc) {
@@ -486,15 +618,14 @@ public class ExecutionOtelPlugin implements DurableExecutionPlugin {
 
     @Override
     public void onUserFunctionEnd(UserFunctionEndInfo info) {
-        if (!tracingEnabled) return;
+        if (invocationSpan == null) return;
 
         var key = attemptKey(info.id(), info.attempt());
 
-        // Close scope first (must happen on same thread as makeCurrent)
-        var scope = attemptScopes.remove(key);
-        if (scope != null) {
-            scope.close();
-        }
+        // A late user-function End still closes the scope on the owning thread.
+        attemptScopes.close(key);
+
+        if (ended) return;
 
         // CONTEXT operations don't have attempt spans — scope cleanup is all we need
         if ("CONTEXT".equals(info.type())) {
@@ -524,22 +655,12 @@ public class ExecutionOtelPlugin implements DurableExecutionPlugin {
 
     // ─── Helpers ─────────────────────────────────────────────────────────
 
-    private boolean bindTracer() {
-        if (tracer != null) {
-            return true;
-        }
-        synchronized (this) {
-            if (tracer != null) {
-                return true;
-            }
-            var setup = OtelPluginSupport.tryResolveGlobalProvider(instrumentationName, "ExecutionOtelPlugin");
-            if (setup == null) {
-                return false;
-            }
-            sdkTracerProvider = setup.sdkTracerProvider();
-            tracer = setup.tracer();
-            return true;
-        }
+    /**
+     * True when this instance emits no telemetry: either the tracer could not be bound for this invocation, or the
+     * invocation has already ended and its spans are closed.
+     */
+    private boolean disabled() {
+        return invocationSpan == null || ended;
     }
 
     private void applyInvocationStatus(Span span, InvocationEndInfo info) {
@@ -632,21 +753,17 @@ public class ExecutionOtelPlugin implements DurableExecutionPlugin {
      */
     private Context withDurableDecision(Context context) {
         var intent = samplingIntent;
-        return intent != null ? DurableSamplingDecision.store(context, intent) : context;
+        return intent != null && OtelPluginSupport.usesLocalDurableSampler(sdkTracerProvider)
+                ? DurableSamplingDecision.store(context, intent)
+                : context;
     }
 
     private TraceFlags effectiveTraceFlags() {
-        var invocation = invocationSpan;
-        if (invocation != null) {
-            return invocation.getSpanContext().getTraceFlags();
-        }
-        var trace = executionTrace;
-        return trace != null ? trace.flags() : TraceFlags.getDefault();
+        return invocationSpan.getSpanContext().getTraceFlags();
     }
 
     private TraceState effectiveTraceState() {
-        var invocation = invocationSpan;
-        return invocation != null ? invocation.getSpanContext().getTraceState() : TraceState.getDefault();
+        return invocationSpan.getSpanContext().getTraceState();
     }
 
     /**
@@ -657,7 +774,7 @@ public class ExecutionOtelPlugin implements DurableExecutionPlugin {
      */
     private Span startDurableSpan(SpanBuilder spanBuilder) {
         var intent = samplingIntent;
-        if (intent == null) {
+        if (intent == null || !OtelPluginSupport.usesDurableSamplingBridge(sdkTracerProvider)) {
             return spanBuilder.startSpan();
         }
         try (var ignored = DurableSamplingDecision.openScope(intent)) {
@@ -668,7 +785,7 @@ public class ExecutionOtelPlugin implements DurableExecutionPlugin {
     /** Starts a durable span with a forced span ID, publishing the sampling intent as in {@link #startDurableSpan}. */
     private Span startDurableSpan(SpanBuilder spanBuilder, String traceId, String spanId) {
         var intent = samplingIntent;
-        if (intent == null) {
+        if (intent == null || !OtelPluginSupport.usesDurableSamplingBridge(sdkTracerProvider)) {
             return idGenerator.startSpan(spanBuilder, traceId, spanId);
         }
         try (var ignored = DurableSamplingDecision.openScope(intent)) {

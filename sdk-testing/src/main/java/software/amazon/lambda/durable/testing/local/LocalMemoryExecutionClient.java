@@ -32,39 +32,63 @@ import software.amazon.lambda.durable.testing.TestResult;
  * in memory, simulating the durable execution backend without AWS infrastructure.
  */
 public class LocalMemoryExecutionClient implements DurableExecutionClient {
-    // use LinkedHashMap to keep insertion order
+    // Keep insertion order. Individual accesses synchronize internally; use a getAllOperations() snapshot for streams.
     private final Map<String, Operation> existingOperations = Collections.synchronizedMap(new LinkedHashMap<>());
     private final EventProcessor eventProcessor = new EventProcessor();
     private final List<OperationUpdate> operationUpdates = new CopyOnWriteArrayList<>();
     private final Map<String, Operation> updatedOperations = new HashMap<>();
     private final Set<String> operationIdsUpdatedSinceLastInvocation = new HashSet<>();
+    private volatile boolean paused;
 
     @Override
     public CheckpointDurableExecutionResponse checkpoint(String arn, String token, List<OperationUpdate> updates) {
         operationUpdates.addAll(updates);
         updates.forEach(update -> applyUpdate(update, true));
 
-        var newToken = UUID.randomUUID().toString();
-
         CheckpointDurableExecutionResponse response;
         synchronized (updatedOperations) {
-            response = CheckpointDurableExecutionResponse.builder()
-                    .checkpointToken(newToken)
+            var responseBuilder = CheckpointDurableExecutionResponse.builder()
                     .newExecutionState(CheckpointUpdatedExecutionState.builder()
                             .operations(updatedOperations.values())
-                            .build())
-                    .build();
+                            .build());
+            if (!paused) {
+                responseBuilder.checkpointToken(UUID.randomUUID().toString());
+            }
+            response = responseBuilder.build();
 
             // updatedOperations was copied into response, so clearing it is safe here
             updatedOperations.clear();
         }
+        if (response.checkpointToken() == null) {
+            updates.forEach(update -> operationIdsUpdatedSinceLastInvocation.add(update.id()));
+        }
         return response;
+    }
+
+    /**
+     * Answers every later checkpoint without a checkpoint token, until {@link #resume()}. Those checkpoints are still
+     * recorded, so the next invocation replays them.
+     */
+    public void pause() {
+        paused = true;
+    }
+
+    /** Answers checkpoints with a checkpoint token again. */
+    public void resume() {
+        paused = false;
+    }
+
+    /** Returns {@code true} while checkpoints are answered without a checkpoint token. */
+    public boolean isPaused() {
+        return paused;
     }
 
     @Override
     public GetDurableExecutionStateResponse getExecutionState(String arn, String checkpointToken, String marker) {
-        // local runner doesn't use this API at all
-        throw new UnsupportedOperationException("getExecutionState is not supported");
+        // A single page of service-visible state. Checkpoint responses and inspection retain the full store.
+        return GetDurableExecutionStateResponse.builder()
+                .operations(ReplayChildrenPruning.visibleOperations(getAllOperations()))
+                .build();
     }
 
     /** Get all operation updates that have been sent to this client. Useful for testing and verification. */
@@ -108,7 +132,7 @@ public class LocalMemoryExecutionClient implements DurableExecutionClient {
 
     /** Returns the operation with the given name, or null if not found. */
     public Operation getOperationByName(String name) {
-        return existingOperations.values().stream()
+        return getAllOperations().stream()
                 .filter(op -> name.equals(op.name()))
                 .findFirst()
                 .orElse(null);
@@ -116,7 +140,9 @@ public class LocalMemoryExecutionClient implements DurableExecutionClient {
 
     /** Returns all operations currently stored. */
     public List<Operation> getAllOperations() {
-        return existingOperations.values().stream().toList();
+        synchronized (existingOperations) {
+            return List.copyOf(existingOperations.values());
+        }
     }
 
     /**
@@ -131,9 +157,15 @@ public class LocalMemoryExecutionClient implements DurableExecutionClient {
 
     /** Build TestResult from current state. */
     public <O> TestResult<O> toTestResult(DurableExecutionOutput output, TypeToken<O> resultType, SerDes serDes) {
-        var testOperations = existingOperations.values().stream()
+        return toTestResult(output, resultType, serDes, null);
+    }
+
+    /** Build TestResult with the execution identity needed to inspect context-aware operation payloads. */
+    public <O> TestResult<O> toTestResult(
+            DurableExecutionOutput output, TypeToken<O> resultType, SerDes serDes, String executionArn) {
+        var testOperations = getAllOperations().stream()
                 .filter(op -> op.type() != OperationType.EXECUTION)
-                .map(op -> new TestOperation(op, eventProcessor.getEventsForOperation(op.id()), serDes))
+                .map(op -> new TestOperation(op, eventProcessor.getEventsForOperation(op.id()), serDes, executionArn))
                 .toList();
         return new TestResult<>(
                 output.status(),
@@ -233,7 +265,7 @@ public class LocalMemoryExecutionClient implements DurableExecutionClient {
     }
 
     private Operation findOperationByCallbackId(String callbackId) {
-        return existingOperations.values().stream()
+        return getAllOperations().stream()
                 .filter(op -> op.callbackDetails() != null
                         && callbackId.equals(op.callbackDetails().callbackId()))
                 .findFirst()
@@ -251,9 +283,9 @@ public class LocalMemoryExecutionClient implements DurableExecutionClient {
         synchronized (updatedOperations) {
             updatedOperations.put(op.id(), op);
         }
-        // Only track operations updated outside of a checkpoint call (i.e., between invocations)
-        // for the updatedOperationIds field. Operations updated during a checkpoint are already
-        // visible to the SDK via the checkpoint response.
+        // Only track operations updated outside of a checkpoint call (i.e., between invocations) here.
+        // Checkpoint updates are tracked by checkpoint() when its tokenless response ends the invocation
+        // before the SDK can observe the returned state.
         if (!withinCheckpoint) {
             operationIdsUpdatedSinceLastInvocation.add(op.id());
         }

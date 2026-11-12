@@ -43,10 +43,16 @@ The publication workflow:
 
 1. Verifies that the tag is a semantic version, points to a commit on the
    default branch, and matches the Maven version in the tagged POM.
-2. Builds, signs, and uploads the SDK, testing library, and OpenTelemetry plugin
-   to Sonatype Central Portal.
-3. Uploads the three JARs to the existing GitHub release.
-4. Opens a pull request for the next development version. A final release
+2. Builds, signs, and uploads the SDK, testing library, OpenTelemetry plugin,
+   and Durable Execution Telemetry Exporter to Sonatype Central Portal.
+3. Uploads the four JARs to the existing GitHub release.
+4. Attaches one ZIP bundle per module to the same release. Each bundle holds
+   every file that module published to Sonatype: the POM, the runtime, source,
+   and Javadoc JARs, and a detached GPG signature for each of them. It also
+   holds a `manifest.json` recording the Maven coordinates and a SHA-256 for
+   every bundled file. The standalone JARs stay available, so archive consumers
+   and Maven consumers get the same artifacts.
+5. Opens a pull request for the next development version. A final release
    increments the patch version, so `2.1.1` produces `2.1.2-SNAPSHOT`. A
    prerelease keeps the same base version, so `2.1.1-rc1` produces
    `2.1.1-SNAPSHOT` until the final `2.1.1` release.
@@ -56,9 +62,74 @@ After **Publish Maven Release** succeeds:
 1. Open [Publishing Deployments](https://central.sonatype.com/publishing/deployments)
    in Sonatype Central Portal.
 2. Find the deployments for the release version and verify that they contain
-   the expected SDK, testing library, and OpenTelemetry plugin artifacts.
+   the expected SDK, testing library, OpenTelemetry plugin, and Durable Execution
+   Telemetry Exporter artifacts.
 3. Click **Publish** for each deployment and wait for publication to complete.
    The workflow uses `autoPublish=false`, so this manual action is required.
 4. Confirm that the GitHub release contains the expected JARs and that the
    artifacts are available in Maven Central.
-5. Review, approve, and merge the next development version pull request.
+5. Confirm that the GitHub release also contains the four `*-bundle.zip`
+   assets and that each one is for the release version. A bundle verifies on
+   its own: extract it, check the SHA-256 of every file against
+   `manifest.json`, then verify a signature against the release signing key
+   with `gpg --verify <file>.asc <file>`.
+6. Review, approve, and merge the next development version pull request.
+
+## 4. Update the shared documentation
+
+The release engineer owns this step for every new version release. Complete it
+after the artifacts are available in Maven Central.
+
+The shared documentation lives in
+[`aws/aws-durable-execution-docs`](https://github.com/aws/aws-durable-execution-docs).
+Checking version strings alone is insufficient. Review the changes in every
+package released, including the testing library, OpenTelemetry plugin, and
+Durable Execution Telemetry plugin when applicable, and update the
+documentation to match:
+
+- [ ] API references and guides that describe new or changed behavior
+- [ ] `examples/java/` snippets that use new or changed APIs
+- [ ] Every literal Java SDK version, set to the release version without the
+      leading `v`
+- [ ] Dependency versions, compatibility guidance, and migration instructions
+
+For a prerelease, update the shared documentation only when that prerelease is
+intended to become the recommended version. Otherwise, wait for the final
+release.
+
+At minimum, check the Java runtime and testing dependencies in:
+
+- `docs/sdk-reference/languages/java/index.md`
+- `docs/getting-started/quickstart.md`
+- `docs/getting-started/quickstart-container-image.md`
+- `docs/getting-started/development-environment.md`
+- `docs/testing/authoring.md`
+
+Search the entire documentation repository so new dependency snippets and API
+references are not missed:
+
+```bash
+rg -n -B2 -A2 \
+  '<artifactId>aws-durable-execution-sdk-java(-testing|-plugin-otel)?</artifactId>' \
+  docs
+rg -n 'aws-durable-execution-sdk-java|software.amazon.lambda.durable' docs examples/java
+```
+
+Update literal versions for the runtime SDK, testing library, and OpenTelemetry
+plugin when present. Do not change independently versioned dependencies such as
+`aws-lambda-java-core`.
+
+Run the documentation checks before opening the pull request:
+
+```bash
+mdformat --check docs/
+codespell docs/
+python3 scripts/check_example_refs.py
+zensical build --clean
+```
+
+Open or update the documentation pull request, link the Java GitHub release in
+its description, and follow through on review and merge after its required
+checks pass. If the release needs no documentation changes, add a note to the
+GitHub release stating that the documentation review was completed and found no
+changes needed.

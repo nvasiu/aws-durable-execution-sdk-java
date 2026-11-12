@@ -37,6 +37,30 @@ var runner = LocalDurableTestRunner.create(Order.class, (order, ctx) -> {
 });
 ```
 
+### Replay State in Local Tests
+
+The local runner's invocation input and its `GetDurableExecutionState` view omit
+descendants of a `SUCCEEDED` or `FAILED` CONTEXT unless that context closed with
+`ReplayChildren: true`. Every ancestor is checked: a running intermediate context
+or an inner context that retains children does not override a completed ancestor
+that omits them. Root operations and operations with unknown parents remain visible.
+
+Only the closing update determines `ReplayChildren`. `START` does not record the
+option, and a close without it records `false`. A large child-context result can
+use retained children to rebuild its result on replay; already-completed steps
+still consume their stored results.
+
+This filtering applies to the state delivered to the SDK. Test results,
+`runner.getOperation(...)`, history, checkpoint response updates, and
+`UpdatedOperationIds` retain all their operation records or IDs. An updated ID can
+therefore refer to an operation omitted from the invocation input; the ID alone
+does not provide its missing metadata. The local state API returns a single page.
+
+Operation names must still remain deterministic. Pruning can prevent the SDK from
+detecting a changed child name when it consumes a cached parent result. Tests of
+name-mismatch detection should also cover retained children and running contexts,
+where the service still provides the relevant checkpoint metadata.
+
 ### Inspecting Operations
 
 ```java
@@ -55,6 +79,47 @@ assertNotNull(paymentResult.getTransactionId());
 List<TestOperation> succeeded = result.getSucceededOperations();
 List<TestOperation> failed = result.getFailedOperations();
 ```
+
+### Inspecting Results with a Custom SerDes
+
+When a step uses a per-operation serializer, pass that serializer to the result
+accessor. The runner supplies the durable execution ARN and the step's
+`operation/<operation-id>/result` entity ID automatically:
+
+```java
+var document = result.getOperation("load-document")
+        .getStepResult(String.class, files);
+
+var records = runner.getOperation("load-records")
+        .getStepResult(new TypeToken<List<String>>() {}, files);
+```
+
+Here, `files` is the `FileSystemSerDes` configuration used by the corresponding
+step. Any custom `SerDes` can be supplied, including implementations of the
+original context-free interface. Both `Class<T>` and `TypeToken<T>` overloads
+support this explicit override. Missing step results return null.
+
+The override applies only to that read. `getStepResult(type)` still uses the
+runner's configured global serializer, and handler input/output serialization
+is unchanged. The test runner does not discover a step's custom serializer from
+its checkpoint or automatically follow file pointers. To inspect the stored
+checkpoint string, use `getStepDetails().result()`.
+
+This API works for local result snapshots, `LocalDurableTestRunner.getOperation`,
+cloud results, and `AsyncExecution` snapshots. Each snapshot retains the execution
+identity it was created with, including after replay or when a cloud runner is
+reused for another execution.
+
+Local filesystem tests can use a JUnit `@TempDir`. Cloud tests that decode file
+references need access to the same filesystem at the absolute path stored by the
+function; the runner does not download payload files from Lambda. Collecting
+results and inspecting raw pointers remains possible without that mount. An
+explicit filesystem read fails with `SerDesException` if its file is unavailable.
+
+Manually constructed `TestOperation` instances can supply the execution ARN through
+`new TestOperation(operation, events, serDes, executionArn)`. The existing
+constructors remain supported and use context-free deserialization when no ARN is
+available.
 
 ### Controlling Time in Tests
 

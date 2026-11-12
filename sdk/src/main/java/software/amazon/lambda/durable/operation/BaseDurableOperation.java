@@ -16,6 +16,7 @@ import software.amazon.awssdk.services.lambda.model.Operation;
 import software.amazon.awssdk.services.lambda.model.OperationStatus;
 import software.amazon.awssdk.services.lambda.model.OperationType;
 import software.amazon.awssdk.services.lambda.model.OperationUpdate;
+import software.amazon.lambda.durable.DurableFuture;
 import software.amazon.lambda.durable.context.DurableContextImpl;
 import software.amazon.lambda.durable.exception.DurableOperationException;
 import software.amazon.lambda.durable.exception.IllegalDurableOperationException;
@@ -61,6 +62,10 @@ public abstract class BaseDurableOperation {
     protected final AtomicBoolean replayCompletedOperation = new AtomicBoolean(false);
     private final DurableContextImpl durableContext;
     private final AtomicReference<CompletableFuture<Void>> runningUserHandler = new AtomicReference<>(null);
+    private final Object handlerOwnerLock = new Object();
+    private Thread handlerOwner;
+    private CompletableFuture<Void> handlerOwnerCompletion;
+    private CompletableFuture<Void> interruptedHandlerCompletion;
 
     protected BaseDurableOperation(
             OperationIdentifier operationIdentifier,
@@ -91,7 +96,7 @@ public abstract class BaseDurableOperation {
         this.completionFuture = new CompletableFuture<>();
 
         // register this operation in ExecutionManager so that the operation can receive updates from ExecutionManager
-        executionManager.registerOperation(this);
+        executionManager.registerOperation(this, parentOperation);
     }
 
     public CompletableFuture<BaseDurableOperation> getCompletionFuture() {
@@ -128,6 +133,7 @@ public abstract class BaseDurableOperation {
      * otherwise starts fresh execution.
      */
     public void execute() {
+        executionManager.rethrowPluginFatalIfPresent();
         if (isVirtual) {
             // Virtual operations are not checkpointed, but we still fire plugin hooks
             // so the OTel plugin can emit spans for map/parallel iterations.
@@ -196,24 +202,44 @@ public abstract class BaseDurableOperation {
         return executionManager.getChildOperations(getOperationId());
     }
 
-    /**
-     * Checks if it's called from a Step.
-     *
-     * @throws IllegalStateException if it's in a step
-     */
-    private void validateCurrentThreadType() {
-        ThreadType current = getCurrentThreadContext().threadType();
-        if (current == ThreadType.STEP) {
-            var message = String.format(
-                    "Nested %s operation is not supported on %s from within a %s execution.",
-                    getType(), getName(), current);
-            throw new IllegalStateException(message);
-        }
-    }
-
     /** Returns true if this operation has completed (successfully or exceptionally). */
     protected boolean isOperationCompleted() {
         return completionFuture.isDone();
+    }
+
+    /**
+     * Waits for the first of the given operations to complete.
+     *
+     * @param operations operations to wait on
+     * @return the first operation future to complete
+     */
+    public static DurableFuture<?> waitForFirstOperationCompletion(List<? extends BaseDurableOperation> operations) {
+        if (operations == null || operations.isEmpty()) {
+            throw new IllegalArgumentException("waitForFirstOperationCompletion requires at least one operation");
+        }
+
+        var executionManager = getExecutionManager(operations);
+
+        return executionManager.waitForFirstOperationCompletion(operations);
+    }
+
+    private static ExecutionManager getExecutionManager(List<? extends BaseDurableOperation> operations) {
+        var first = operations.get(0);
+        if (first == null) {
+            throw new IllegalArgumentException("waitForFirstOperationCompletion requires non-null operations");
+        }
+
+        var executionManager = first.executionManager;
+        for (var operation : operations) {
+            if (operation == null) {
+                throw new IllegalArgumentException("waitForFirstOperationCompletion requires non-null operations");
+            }
+            if (operation.executionManager != executionManager) {
+                throw new IllegalArgumentException(
+                        "waitForFirstOperationCompletion requires operations from the same ExecutionManager");
+            }
+        }
+        return executionManager;
     }
 
     /**
@@ -223,36 +249,7 @@ public abstract class BaseDurableOperation {
      * @return the completed operation
      */
     protected Operation waitForOperationCompletion() {
-
-        validateCurrentThreadType();
-
-        var threadContext = getCurrentThreadContext();
-        CompletableFuture<?> future = completionFuture;
-
-        // It's important that we synchronize access to the future. Otherwise, a race condition could happen if the
-        // completionFuture is completed by a user thread (a step or child context thread) when the execution here
-        // is between `isOperationCompleted` and `thenRun`.
-        // If this operation is a branch/iteration of a ConcurrencyOperation (map or parallel), the branches/iterations
-        // must be completed sequentially to avoid race conditions.
-        synchronized (completionLock()) {
-            if (!isOperationCompleted()) {
-                // Add a completion stage to completionFuture so that when the completionFuture is completed,
-                // it will register the current Context thread synchronously to make sure it is always registered
-                // strictly before the execution thread (Step or child context) is deregistered.
-                // chain them together
-                future = completionFuture.thenRun(() -> registerActiveThread(threadContext.threadId()));
-
-                // Deregister the current thread to allow suspension
-                deregisterActiveThread(threadContext.threadId());
-            }
-        }
-
-        // Block until operation completes. No-op if the future is already completed.
-        try {
-            future.join();
-        } catch (Throwable throwable) {
-            ExceptionHelper.sneakyThrow(ExceptionHelper.unwrapCompletableFuture(throwable));
-        }
+        executionManager.waitForOperationCompletion(this);
 
         if (isVirtual) {
             // We don't  store virtual operations so they don't corresponding Operation in storage
@@ -279,14 +276,21 @@ public abstract class BaseDurableOperation {
      * @param threadType the thread type (STEP or CONTEXT)
      */
     protected void runUserHandler(Runnable runnable, ThreadType threadType) {
+        executionManager.rethrowPluginFatalIfPresent();
         String operationId = getOperationId();
         logger.debug("Starting user handler for operation {} ({})", operationId, threadType);
         Runnable wrapped = () -> {
             executionManager.setCurrentThreadContext(new ThreadContext(operationId, threadType));
 
             try {
+                // A task accepted before another hook failed may only now be starting on its worker.
+                executionManager.rethrowPluginFatalIfPresent();
+                if (executionManager.isCheckpointTokenRevoked()) {
+                    throw new SuspendExecutionException();
+                }
                 runnable.run();
             } catch (Throwable throwable) {
+                executionManager.rethrowPluginFatalIfPresent();
                 // Operations wrap the user function and handle all outcomes except for SuspendExecutionException.
                 // Anything else reaching here is unexpected and terminates the execution.
                 if (!executionManager.isExecutionCompletedExceptionally()
@@ -329,8 +333,54 @@ public abstract class BaseDurableOperation {
         // registerActiveThread is idempotent (no-op if already registered).
         registerActiveThread(operationId);
 
-        runningUserHandler.set(CompletableFuture.runAsync(
-                wrapped, getContext().getDurableConfig().getExecutorService()));
+        var completion = new CompletableFuture<Void>();
+        runningUserHandler.set(completion);
+        Runnable observed = (Runnable & CompletableFuture.AsynchronousCompletionTask) () -> {
+            synchronized (handlerOwnerLock) {
+                handlerOwner = Thread.currentThread();
+                handlerOwnerCompletion = completion;
+            }
+            try {
+                wrapped.run();
+                executionManager.rethrowPluginFatalIfPresent();
+                clearHandlerOwner(completion);
+                completion.complete(null);
+            } catch (Throwable failure) {
+                clearHandlerOwner(completion);
+                completion.completeExceptionally(failure);
+                // Settle accepted work before propagating on either an async worker or the direct caller. The
+                // invocation boundary still finalizes plugins, but the operation call must not return normally.
+                executionManager.rethrowPluginFatalIfPresent();
+            } finally {
+                clearHandlerOwner(completion);
+            }
+        };
+        try {
+            executionManager.executeOperationTask(this, observed, failure -> {
+                // A task cancelled before entry has no worker finally block to release its active registration.
+                if (operationId != null) executionManager.cancelThreadRegistration(operationId);
+                if (failure != null) completion.completeExceptionally(failure);
+                else completion.complete(null);
+            });
+        } catch (Throwable failure) {
+            // No accepted task will settle a rejected submission. Complete the published future so shutdown cannot
+            // wait forever, and remove its reservation without turning submission failure into suspension.
+            if (completion.completeExceptionally(failure) && operationId != null) {
+                executionManager.cancelThreadRegistration(operationId);
+            }
+            ExceptionHelper.sneakyThrow(failure);
+        }
+    }
+
+    private void clearHandlerOwner(CompletableFuture<Void> completion) {
+        synchronized (handlerOwnerLock) {
+            // Revoke interruption before publishing completion and invoking callbacks. A callback may start a new
+            // attempt, so an older runnable's finally must not clear that new owner.
+            if (handlerOwnerCompletion == completion) {
+                handlerOwner = null;
+                handlerOwnerCompletion = null;
+            }
+        }
     }
 
     /**
@@ -349,19 +399,26 @@ public abstract class BaseDurableOperation {
      * @return the user function's result
      */
     protected <T> T runUserFunction(Integer attempt, Supplier<T> userFunction) {
-        var pluginRunner = getPluginRunner();
+        var pluginRunner = getPluginRunner().captureUserFunctionHooks();
         var startInfo = PluginInfoConverter.toUserFunctionStartInfo(
                 operationIdentifier,
                 durableContext.getParentId(),
                 executionManager.wasObservedAtInvocationStart(getOperationId()),
                 attempt);
         pluginRunner.onUserFunctionStart(startInfo);
+        T result;
         try {
-            T result = userFunction.get();
-            pluginRunner.onUserFunctionEnd(
-                    PluginInfoConverter.toUserFunctionEndInfo(startInfo, UserFunctionOutcome.SUCCEEDED, null));
-            return result;
+            executionManager.rethrowPluginFatalIfPresent();
+            result = userFunction.get();
+            executionManager.rethrowPluginFatalIfPresent();
         } catch (Throwable e) {
+            try {
+                executionManager.rethrowPluginFatalIfPresent();
+            } catch (Error fatal) {
+                pluginRunner.onUserFunctionEndAfterFatal(
+                        PluginInfoConverter.toUserFunctionEndInfo(startInfo, UserFunctionOutcome.FAILED, fatal), fatal);
+                throw fatal;
+            }
             var error = ExceptionHelper.unwrapCompletableFuture(e);
             if (error == null) {
                 error = e;
@@ -373,6 +430,9 @@ public abstract class BaseDurableOperation {
             ExceptionHelper.sneakyThrow(e);
             return null; // unreachable — sneakyThrow always throws
         }
+        pluginRunner.onUserFunctionEnd(
+                PluginInfoConverter.toUserFunctionEndInfo(startInfo, UserFunctionOutcome.SUCCEEDED, null));
+        return result;
     }
 
     /**
@@ -403,10 +463,7 @@ public abstract class BaseDurableOperation {
      * @param publishUpdate publishes the operation to execution state
      */
     public final void processCheckpointUpdate(Operation operation, Runnable publishUpdate) {
-        synchronized (completionLock()) {
-            publishUpdate.run();
-            onCheckpointComplete(operation);
-        }
+        executionManager.processCheckpointUpdate(this, operation, publishUpdate);
     }
 
     /** Marks the operation as already completed (in replay). */
@@ -418,19 +475,11 @@ public abstract class BaseDurableOperation {
     }
 
     private void markCompletionFutureCompleted() {
-        // It's important that we synchronize access to the future, otherwise the processing could happen
-        // on someone else's thread and cause a race condition.
-        synchronized (completionLock()) {
-            // Completing the future here will also run any other completion stages that have been attached
-            // to the future. In our case, other contexts may have attached a function to reactivate themselves,
-            // so they will definitely have a chance to reactivate before we finish completing and deactivating
-            // whatever operations were just checkpointed.
-            completionFuture.complete(this);
-        }
-    }
-
-    private CompletableFuture<BaseDurableOperation> completionLock() {
-        return parentOperation == null ? completionFuture : parentOperation.completionFuture;
+        // Completing the future here will also run any other completion stages that have been attached to the future.
+        // In our case, other contexts may have attached a function to reactivate themselves, so they will definitely
+        // have a chance to reactivate before we finish completing and deactivating whatever operations were
+        // checkpointed.
+        executionManager.completeOperation(this);
     }
 
     /**
@@ -550,16 +599,42 @@ public abstract class BaseDurableOperation {
         }
     }
 
+    /**
+     * Requests cooperative owner interruption after an invocation has failed fatally. The actual completion future is
+     * left pending until the owner unwinds. Synchronization prevents interrupting a worker after it has been reused.
+     */
+    public void interruptRunningUserHandler() {
+        synchronized (handlerOwnerLock) {
+            if (handlerOwner != null
+                    && handlerOwner != Thread.currentThread()
+                    && !handlerOwnerCompletion.isDone()
+                    && interruptedHandlerCompletion != handlerOwnerCompletion) {
+                interruptedHandlerCompletion = handlerOwnerCompletion;
+                handlerOwner.interrupt();
+            }
+        }
+    }
+
+    /** Whether this caller is the current operation attempt's owner, which must never await itself. */
+    public boolean isRunningUserHandlerOwner() {
+        synchronized (handlerOwnerLock) {
+            return handlerOwner == Thread.currentThread();
+        }
+    }
+
     public CompletableFuture<Void> getRunningUserHandler() {
         return runningUserHandler.get();
     }
 
     // ─── Plugin hook helpers ─────────────────────────────────────────────
 
-    /** Returns the plugin runner from config, or no-op if config is unavailable. */
+    /**
+     * Returns this invocation's plugin runner, scoped to the ExecutionManager of this invocation. Falls back to a no-op
+     * runner when the manager does not provide one (mocked managers in unit tests).
+     */
     private PluginRunner getPluginRunner() {
-        var config = getContext().getDurableConfig();
-        return config != null ? config.getPluginRunner() : PluginRunner.noOp();
+        var pluginRunner = executionManager.getPluginRunner();
+        return pluginRunner != null ? pluginRunner : PluginRunner.noOp();
     }
 
     /** Fires onOperationStart plugin hook. */
@@ -576,8 +651,8 @@ public abstract class BaseDurableOperation {
     }
 
     /**
-     * Extracts the error from a terminal operation as a Throwable. Returns null if the operation succeeded or has no
-     * error details.
+     * Extracts an error for plugin metadata from a failed, timed-out, or stopped operation. Other statuses and an
+     * absent error container return null. A present container remains represented even when it has no members.
      */
     public static Throwable extractErrorFromOperation(Operation operation) {
         if (operation.status() != OperationStatus.FAILED
@@ -610,6 +685,10 @@ public abstract class BaseDurableOperation {
                         : null;
             case CONTEXT ->
                 operation.contextDetails() != null ? operation.contextDetails().error() : null;
+            case DISTRIBUTED_MAP ->
+                operation.distributedMapDetails() != null
+                        ? operation.distributedMapDetails().error()
+                        : null;
             default -> null;
         };
     }

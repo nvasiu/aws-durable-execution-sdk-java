@@ -8,12 +8,15 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.*;
 
+import java.lang.reflect.Field;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.lambda.model.ContextDetails;
@@ -26,6 +29,7 @@ import software.amazon.lambda.durable.DurableConfig;
 import software.amazon.lambda.durable.TestUtils;
 import software.amazon.lambda.durable.TypeToken;
 import software.amazon.lambda.durable.config.CompletionConfig;
+import software.amazon.lambda.durable.config.NestingType;
 import software.amazon.lambda.durable.config.ParallelBranchConfig;
 import software.amazon.lambda.durable.config.ParallelConfig;
 import software.amazon.lambda.durable.context.DurableContextImpl;
@@ -78,8 +82,11 @@ class ParallelOperationTest {
                 .thenReturn(DurableConfig.builder()
                         .withExecutorService(Executors.newCachedThreadPool())
                         .build());
-        when(durableContext.createChildContext(anyString(), anyString(), eq(false)))
+        when(durableContext.createChildContext(anyString(), anyString(), anyBoolean()))
                 .thenReturn(childContext);
+        when(childContext.createChildContext(anyString(), anyString(), anyBoolean()))
+                .thenReturn(childContext);
+        TestUtils.executeOperationTasks(executionManager, durableContext);
 
         // Capture registered operations so we can drive onCheckpointComplete callbacks.
         var registeredOps = new ConcurrentHashMap<String, BaseDurableOperation>();
@@ -89,7 +96,8 @@ class ParallelOperationTest {
                     return null;
                 })
                 .when(executionManager)
-                .registerOperation(any());
+                .registerOperation(any(BaseDurableOperation.class), nullable(BaseDurableOperation.class));
+        MockExecutionManagerSupport.stubWaitForOperationCompletion(executionManager);
 
         // Simulate the real backend for all sendOperationUpdate calls.
         // For SUCCEED on the parallel op: write to operationStore first (establishes happens-before
@@ -121,14 +129,25 @@ class ParallelOperationTest {
     }
 
     private ParallelOperation createOperation(CompletionConfig completionConfig) {
-        var op = new ParallelOperation(
-                OperationIdentifier.of(OPERATION_ID, "test-parallel", OperationSubType.PARALLEL),
-                SER_DES,
-                durableContext,
+        var op = createUnstartedOperation(
                 ParallelConfig.builder().completionConfig(completionConfig).build());
 
         op.execute();
         return op;
+    }
+
+    private ParallelOperation createUnstartedOperation(ParallelConfig config) {
+        return new ParallelOperation(
+                OperationIdentifier.of(OPERATION_ID, "test-parallel", OperationSubType.PARALLEL),
+                SER_DES,
+                durableContext,
+                config);
+    }
+
+    private void setBranches(ParallelOperation op, List<ChildContextOperation<?>> branches) throws Exception {
+        Field field = ConcurrencyOperation.class.getDeclaredField("branches");
+        field.setAccessible(true);
+        field.set(op, branches);
     }
 
     // ===== Branch creation delegates to ConcurrencyOperation =====
@@ -366,7 +385,8 @@ class ParallelOperationTest {
 
         // The child operation should be registered in the execution manager
         // (BaseDurableOperation constructor calls executionManager.registerOperation)
-        verify(executionManager, atLeastOnce()).registerOperation(any());
+        verify(executionManager, atLeastOnce())
+                .registerOperation(any(BaseDurableOperation.class), nullable(BaseDurableOperation.class));
         assertNotNull(childOp);
     }
 
@@ -575,5 +595,81 @@ class ParallelOperationTest {
         assertEquals(0, result.failed());
         assertEquals(ConcurrencyCompletionStatus.ALL_COMPLETED, result.completionStatus());
         verify(executionManager).sendOperationUpdate(argThat(update -> update.action() == OperationAction.SUCCEED));
+    }
+
+    @Test
+    void allCompleted_doesNotCombineStaleBranchCountWithJoinedState() throws Exception {
+        var branches = new BlockingFirstSizeList();
+        var op = createUnstartedOperation(ParallelConfig.builder()
+                .completionConfig(CompletionConfig.allCompleted())
+                .nestingType(NestingType.FLAT)
+                .build());
+        setBranches(op, branches);
+
+        var branchCalled = new AtomicBoolean(false);
+        op.execute();
+        assertTrue(branches.awaitFirstSizeStarted());
+
+        var branchFuture = op.branch(
+                "branch-1",
+                TypeToken.get(String.class),
+                ctx -> {
+                    branchCalled.set(true);
+                    return "done";
+                },
+                ParallelBranchConfig.builder().serDes(SER_DES).build());
+        var joined = new CountDownLatch(1);
+        doAnswer(inv -> {
+                    if (op.isJoined.get()) {
+                        joined.countDown();
+                    }
+                    return null;
+                })
+                .when(executionManager)
+                .deregisterActiveThread(any());
+        var resultFuture = CompletableFuture.supplyAsync(op::get);
+
+        assertTrue(joined.await(5, TimeUnit.SECONDS));
+        branches.releaseFirstSize();
+
+        var result = resultFuture.get(5, TimeUnit.SECONDS);
+        assertEquals(1, result.size());
+        assertEquals(1, result.succeeded());
+        assertEquals(0, result.failed());
+        assertEquals(0, result.skipped());
+        assertEquals(ConcurrencyCompletionStatus.ALL_COMPLETED, result.completionStatus());
+        assertEquals(List.of(ParallelResult.Status.SUCCEEDED), result.statuses());
+        assertTrue(branchCalled.get());
+        assertEquals("done", branchFuture.get());
+    }
+
+    private static final class BlockingFirstSizeList extends ArrayList<ChildContextOperation<?>> {
+        private final CountDownLatch firstSizeStarted = new CountDownLatch(1);
+        private final CountDownLatch releaseFirstSize = new CountDownLatch(1);
+        private final AtomicBoolean shouldBlock = new AtomicBoolean(true);
+
+        @Override
+        public int size() {
+            if (shouldBlock.getAndSet(false)) {
+                var size = super.size();
+                firstSizeStarted.countDown();
+                try {
+                    assertTrue(releaseFirstSize.await(5, TimeUnit.SECONDS));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError("Interrupted while blocking first size() call", e);
+                }
+                return size;
+            }
+            return super.size();
+        }
+
+        boolean awaitFirstSizeStarted() throws InterruptedException {
+            return firstSizeStarted.await(5, TimeUnit.SECONDS);
+        }
+
+        void releaseFirstSize() {
+            releaseFirstSize.countDown();
+        }
     }
 }

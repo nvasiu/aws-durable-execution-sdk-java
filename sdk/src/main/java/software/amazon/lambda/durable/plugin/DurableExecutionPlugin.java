@@ -10,10 +10,32 @@ package software.amazon.lambda.durable.plugin;
  *
  * <p>All methods have default no-op implementations, allowing plugins to override only the hooks they need.
  *
- * <p>Plugin errors are isolated — exceptions thrown by plugin methods are caught and logged but never disrupt SDK
- * execution.
+ * <p>Non-fatal plugin failures are caught and logged without disrupting SDK execution. {@link VirtualMachineError} and
+ * {@link ThreadDeath} propagate, including when wrapped by asynchronous completion/future exceptions.
  */
 public interface DurableExecutionPlugin {
+
+    /**
+     * Optionally supplies operation-level trace propagation metadata synchronously. Return null to abstain. This hook
+     * runs when creating a new invoke START checkpoint after the operation-start hook. Replaying a checkpointed START
+     * or terminal result does not call it; an uncommitted START may call it again on a later invocation. Produce
+     * metadata deterministically from the input without mutating execution state or creating side effects.
+     */
+    default PropagationMetadata providePropagationMetadata(PropagationInput input) {
+        var header = providePropagationMetadata(
+                input.executionArn(), input.operationId(), input.parentOperationId(), input.targetFunctionName());
+        return header != null ? new PropagationMetadata(header) : null;
+    }
+
+    /**
+     * Optional layer-compatible X-Ray producer capability. String-only linkage lets a new plugin layer keep loading on
+     * older cores that do not know PropagationInput/PropagationMetadata; those cores simply never call this hook. The
+     * typed hook above is the preferred core contract and adapts this capability into its immutable result.
+     */
+    default String providePropagationMetadata(
+            String executionArn, String operationId, String parentOperationId, String targetFunctionName) {
+        return null;
+    }
 
     // ─── Invocation-level hooks ──────────────────────────────────────────
 
@@ -21,15 +43,17 @@ public interface DurableExecutionPlugin {
      * Called at the start of each Lambda invocation. Use to set up per-invocation state (trace ID, invocation span).
      *
      * <p>Check {@link InvocationInfo#isFirstInvocation()} to detect the first invocation of an execution (useful for
-     * sampling decisions or execution-level span creation).
+     * sampling decisions or execution-level span creation). The runtime-thread snapshot is available through
+     * {@link InvocationInfo#xRayTraceId()}.
      */
     default void onInvocationStart(InvocationInfo info) {}
 
     /**
      * Called at the end of each Lambda invocation. Use to flush spans/metrics before Lambda freezes.
      *
-     * <p>This hook is awaited — the SDK blocks until it returns. This is the only safe flush point before Lambda
-     * freezes the execution environment.
+     * <p>This hook runs on the root handler thread after body/scope unwinding, operation and checkpoint drain, and
+     * output preparation. It is awaited before the invocation returns and is the safe flush point before Lambda freezes
+     * the execution environment.
      *
      * <p>Check {@link InvocationEndInfo#invocationStatus()} to detect if the execution reached a terminal state in this
      * invocation (useful for writing summary records or flushing final data).
@@ -78,6 +102,10 @@ public interface DurableExecutionPlugin {
      * functions.
      *
      * <p>This hook fires on the same thread as user code, so plugins can close OTel scopes here.
+     *
+     * <p>If a later plugin's start hook fails fatally, plugins whose start hooks completed successfully receive this
+     * hook in reverse order on the same thread, with {@link UserFunctionOutcome#FAILED} and the original fatal error.
+     * The user function does not run in that case. Cleanup failures do not replace the original start-hook error.
      *
      * <p>It fires for every outcome of the user function: normal return, a thrown failure, and suspension. Check
      * {@link UserFunctionEndInfo#outcome()} to distinguish them. A suspended function reports

@@ -18,10 +18,10 @@ import software.amazon.lambda.durable.DurableConfig;
 import software.amazon.lambda.durable.DurableContext;
 import software.amazon.lambda.durable.DurableHandler;
 import software.amazon.lambda.durable.TypeToken;
+import software.amazon.lambda.durable.annotations.Experimental;
 import software.amazon.lambda.durable.execution.DurableExecutor;
 import software.amazon.lambda.durable.model.DurableExecutionInput;
 import software.amazon.lambda.durable.model.ExecutionStatus;
-import software.amazon.lambda.durable.plugin.DurableExecutionPlugin;
 import software.amazon.lambda.durable.serde.SerDes;
 import software.amazon.lambda.durable.testing.local.LocalMemoryExecutionClient;
 import software.amazon.lambda.durable.testing.local.OperationResult;
@@ -47,6 +47,9 @@ public class LocalDurableTestRunner<I, O> {
     // operation ID stay stable across reinvocations, while only per-invocation values (the checkpoint token) change.
     private final String executionName = UUID.randomUUID().toString();
     private final String executionOperationId = UUID.randomUUID().toString();
+    private final String executionArn = String.format(
+            "arn:aws:lambda:us-east-1:123456789012:function:test:$LATEST/durable-execution/%s/%s",
+            executionName, executionOperationId);
 
     private LocalDurableTestRunner(
             TypeToken<I> inputType,
@@ -61,16 +64,8 @@ public class LocalDurableTestRunner<I, O> {
         // Create config that uses customer's configuration but overrides the client with in-memory storage
         if (customerConfig != null) {
             // Use customer's config but override the client with our in-memory implementation
-            this.customerConfig = DurableConfig.builder()
+            this.customerConfig = customerConfig.toBuilder()
                     .withDurableExecutionClient(storage)
-                    .withSerDes(customerConfig.getSerDes())
-                    .withExecutorService(customerConfig.getExecutorService())
-                    .withPollingStrategy(customerConfig.getPollingStrategy())
-                    .withCheckpointDelay(customerConfig.getCheckpointDelay())
-                    .withLoggerConfig(customerConfig.getLoggerConfig())
-                    // Temporary: remove along with the checkpointEmptyMap flag in a future major version.
-                    .withCheckpointEmptyMap(customerConfig.shouldCheckpointEmptyMap())
-                    .withPlugins(customerConfig.getPluginRunner().getPlugins().toArray(new DurableExecutionPlugin[0]))
                     .build();
         } else {
             // Fallback to default config with in-memory client
@@ -246,7 +241,7 @@ public class LocalDurableTestRunner<I, O> {
 
         var output = DurableExecutor.execute(durableInput, mockLambdaContext(), inputType, handler, customerConfig);
 
-        return storage.toTestResult(output, outputType, serDes);
+        return storage.toTestResult(output, outputType, serDes, executionArn);
     }
 
     /**
@@ -262,14 +257,39 @@ public class LocalDurableTestRunner<I, O> {
         for (int i = 0; i < MAX_INVOCATIONS; i++) {
             result = run(input);
 
-            if (result.getStatus() != ExecutionStatus.PENDING || !storage.advanceTime()) {
+            if (result.getStatus() != ExecutionStatus.PENDING || storage.isPaused() || !storage.advanceTime()) {
                 // break the loop if
                 // - Return SUCCEEDED or FAILED - we're done
+                // - Paused: no checkpoint can be recorded, so every further invocation would report PENDING again
                 // - Return PENDING and let test manually advance operations if no operations can be auto advanced
                 break;
             }
         }
         return result;
+    }
+
+    /**
+     * Answers every later checkpoint without a checkpoint token, until {@link #resumeExecution()}.
+     *
+     * <p>The invocation running at the time stops checkpointing and returns PENDING. The checkpoint that received the
+     * token-less response was recorded, so its updates survive; work the SDK had not yet sent is abandoned and replays
+     * after {@link #resumeExecution()}. {@link #runUntilComplete(Object)} returns as soon as it sees that PENDING,
+     * because no further invocation could record anything either.
+     *
+     * <p>Advance waits and complete callbacks while paused as usual; the next invocation observes them only once the
+     * execution is resumed, since this runner invokes the handler only when a test asks it to.
+     *
+     * <p>Idempotent.
+     */
+    @Experimental
+    public void pauseExecution() {
+        storage.pause();
+    }
+
+    /** Answers checkpoints with a checkpoint token again, so the next {@code run} replays the abandoned work. */
+    @Experimental
+    public void resumeExecution() {
+        storage.resume();
     }
 
     /** Resets a named step operation to STARTED status, simulating a checkpoint failure. */
@@ -285,7 +305,7 @@ public class LocalDurableTestRunner<I, O> {
     /** Returns the {@link TestOperation} for the given operation name, or null if not found. */
     public TestOperation getOperation(String name) {
         var op = storage.getOperationByName(name);
-        return op != null ? new TestOperation(op, serDes) : null;
+        return op != null ? new TestOperation(op, List.of(), serDes, executionArn) : null;
     }
 
     /** Get callback ID for a named callback operation. */
@@ -336,9 +356,6 @@ public class LocalDurableTestRunner<I, O> {
     private DurableExecutionInput createDurableInput(I input) {
         // The last ARN segment must equal the EXECUTION operation ID (ExecutionManager parses the ARN to find it), and
         // both are stable across reinvocations so the execution keeps one identity — and one derived trace ID.
-        var executionArn = String.format(
-                "arn:aws:lambda:us-east-1:123456789012:function:test:$LATEST/durable-execution/%s/%s",
-                executionName, executionOperationId);
         var inputJson = serDes.serialize(input);
 
         // The list must contain exactly one EXECUTION operation, matching the backend, which keeps a single EXECUTION
@@ -379,9 +396,10 @@ public class LocalDurableTestRunner<I, O> {
         }
         var executionOp = executionOpBuilder.build();
 
-        // Load previous non-EXECUTION operations; the single merged EXECUTION operation above already represents the
-        // execution's state.
-        var existingOps = storage.getAllOperations().stream()
+        // Invocation input follows the same child-retention rule as GetDurableExecutionState. The inspection store
+        // remains complete; the single merged EXECUTION operation above already represents the execution's state.
+        var checkpointToken = UUID.randomUUID().toString();
+        var existingOps = storage.getExecutionState(executionArn, checkpointToken, null).operations().stream()
                 .filter(op -> op.type() != OperationType.EXECUTION)
                 .toList();
         var allOps = new ArrayList<>(List.of(executionOp));
@@ -393,7 +411,7 @@ public class LocalDurableTestRunner<I, O> {
 
         return new DurableExecutionInput(
                 executionArn,
-                UUID.randomUUID().toString(),
+                checkpointToken,
                 CheckpointUpdatedExecutionState.builder().operations(allOps).build(),
                 updatedOperationIds);
     }

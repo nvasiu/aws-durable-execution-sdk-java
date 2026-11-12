@@ -9,6 +9,9 @@ import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import software.amazon.lambda.durable.config.CallbackConfig;
+import software.amazon.lambda.durable.config.DistributedMapConfig;
+import software.amazon.lambda.durable.config.DistributedMapProcessor;
+import software.amazon.lambda.durable.config.DistributedMapSource;
 import software.amazon.lambda.durable.config.InvokeConfig;
 import software.amazon.lambda.durable.config.MapConfig;
 import software.amazon.lambda.durable.config.ParallelConfig;
@@ -18,6 +21,9 @@ import software.amazon.lambda.durable.config.WaitForCallbackConfig;
 import software.amazon.lambda.durable.config.WaitForConditionConfig;
 import software.amazon.lambda.durable.config.WithRetryConfig;
 import software.amazon.lambda.durable.context.BaseContext;
+import software.amazon.lambda.durable.exception.ChildContextFailedException;
+import software.amazon.lambda.durable.model.DistributedMapResult;
+import software.amazon.lambda.durable.model.DistributedMapSummary;
 import software.amazon.lambda.durable.model.MapResult;
 import software.amazon.lambda.durable.model.WaitForConditionResult;
 
@@ -543,11 +549,221 @@ public interface DurableContext extends BaseContext {
      */
     ParallelDurableFuture parallel(String name, ParallelConfig config);
 
+    // =============== distributedMap ================
+
+    /**
+     * Runs a distributed map with default config, blocking until the run reaches a terminal state.
+     *
+     * @param maxConcurrency the maximum number of items processed concurrently. Required, with no service default.
+     */
+    default <I> DistributedMapSummary distributedMap(
+            String name, DistributedMapSource<I> source, DistributedMapProcessor processor, int maxConcurrency) {
+        return distributedMapAsync(
+                        name,
+                        source,
+                        processor,
+                        maxConcurrency,
+                        DistributedMapConfig.builder().build())
+                .get();
+    }
+
+    /**
+     * Runs a distributed map, blocking until the run reaches a terminal state.
+     *
+     * @param maxConcurrency the maximum number of items processed concurrently. Required, with no service default.
+     */
+    default <I> DistributedMapSummary distributedMap(
+            String name,
+            DistributedMapSource<I> source,
+            DistributedMapProcessor processor,
+            int maxConcurrency,
+            DistributedMapConfig config) {
+        return distributedMapAsync(name, source, processor, maxConcurrency, config)
+                .get();
+    }
+
+    /**
+     * Runs a distributed map that collects per-item results with a TypeToken, blocking until the run reaches a terminal
+     * state.
+     *
+     * @param maxConcurrency the maximum number of items processed concurrently. Required, with no service default.
+     */
+    default <I, O> DistributedMapResult<O> distributedMap(
+            String name,
+            DistributedMapSource<I> source,
+            DistributedMapProcessor processor,
+            int maxConcurrency,
+            TypeToken<O> resultType,
+            DistributedMapConfig config) {
+        return distributedMapAsync(name, source, processor, maxConcurrency, resultType, config)
+                .get();
+    }
+
+    /**
+     * Runs a distributed map that collects per-item results with a result Class, blocking until the run reaches a
+     * terminal state.
+     *
+     * @param maxConcurrency the maximum number of items processed concurrently. Required, with no service default.
+     */
+    default <I, O> DistributedMapResult<O> distributedMap(
+            String name,
+            DistributedMapSource<I> source,
+            DistributedMapProcessor processor,
+            int maxConcurrency,
+            Class<O> resultType,
+            DistributedMapConfig config) {
+        return distributedMapAsync(name, source, processor, maxConcurrency, TypeToken.get(resultType), config)
+                .get();
+    }
+
+    /**
+     * Runs a distributed map that collects per-item results with a result Class and default config, blocking until the
+     * run reaches a terminal state.
+     *
+     * @param maxConcurrency the maximum number of items processed concurrently. Required, with no service default.
+     */
+    default <I, O> DistributedMapResult<O> distributedMap(
+            String name,
+            DistributedMapSource<I> source,
+            DistributedMapProcessor processor,
+            int maxConcurrency,
+            Class<O> resultType) {
+        return distributedMapAsync(
+                        name,
+                        source,
+                        processor,
+                        maxConcurrency,
+                        TypeToken.get(resultType),
+                        DistributedMapConfig.builder().build())
+                .get();
+    }
+
+    /**
+     * Runs a distributed map that collects per-item results with a TypeToken and default config, blocking until the run
+     * reaches a terminal state.
+     *
+     * @param maxConcurrency the maximum number of items processed concurrently. Required, with no service default.
+     */
+    default <I, O> DistributedMapResult<O> distributedMap(
+            String name,
+            DistributedMapSource<I> source,
+            DistributedMapProcessor processor,
+            int maxConcurrency,
+            TypeToken<O> resultType) {
+        return distributedMapAsync(
+                        name,
+                        source,
+                        processor,
+                        maxConcurrency,
+                        resultType,
+                        DistributedMapConfig.builder().build())
+                .get();
+    }
+
+    /**
+     * Asynchronously runs a distributed map with default config.
+     *
+     * @param maxConcurrency the maximum number of items processed concurrently. Required, with no service default.
+     */
+    default <I> DurableFuture<DistributedMapSummary> distributedMapAsync(
+            String name, DistributedMapSource<I> source, DistributedMapProcessor processor, int maxConcurrency) {
+        return distributedMapAsync(
+                name,
+                source,
+                processor,
+                maxConcurrency,
+                DistributedMapConfig.builder().build());
+    }
+
+    /**
+     * Asynchronously runs a distributed map.
+     *
+     * @param maxConcurrency the maximum number of items processed concurrently. Required, with no service default.
+     */
+    <I> DurableFuture<DistributedMapSummary> distributedMapAsync(
+            String name,
+            DistributedMapSource<I> source,
+            DistributedMapProcessor processor,
+            int maxConcurrency,
+            DistributedMapConfig config);
+
+    /**
+     * Asynchronously runs a distributed map that collects per-item results with a TypeToken.
+     *
+     * @param maxConcurrency the maximum number of items processed concurrently. Required, with no service default.
+     */
+    <I, O> DurableFuture<DistributedMapResult<O>> distributedMapAsync(
+            String name,
+            DistributedMapSource<I> source,
+            DistributedMapProcessor processor,
+            int maxConcurrency,
+            TypeToken<O> resultType,
+            DistributedMapConfig config);
+
+    /**
+     * Asynchronously runs a distributed map that collects per-item results with a result Class.
+     *
+     * @param maxConcurrency the maximum number of items processed concurrently. Required, with no service default.
+     */
+    default <I, O> DurableFuture<DistributedMapResult<O>> distributedMapAsync(
+            String name,
+            DistributedMapSource<I> source,
+            DistributedMapProcessor processor,
+            int maxConcurrency,
+            Class<O> resultType,
+            DistributedMapConfig config) {
+        return distributedMapAsync(name, source, processor, maxConcurrency, TypeToken.get(resultType), config);
+    }
+
+    /**
+     * Asynchronously runs a distributed map that collects per-item results with a result Class and default config.
+     *
+     * @param maxConcurrency the maximum number of items processed concurrently. Required, with no service default.
+     */
+    default <I, O> DurableFuture<DistributedMapResult<O>> distributedMapAsync(
+            String name,
+            DistributedMapSource<I> source,
+            DistributedMapProcessor processor,
+            int maxConcurrency,
+            Class<O> resultType) {
+        return distributedMapAsync(
+                name,
+                source,
+                processor,
+                maxConcurrency,
+                TypeToken.get(resultType),
+                DistributedMapConfig.builder().build());
+    }
+
+    /**
+     * Asynchronously runs a distributed map that collects per-item results with a TypeToken and default config.
+     *
+     * @param maxConcurrency the maximum number of items processed concurrently. Required, with no service default.
+     */
+    default <I, O> DurableFuture<DistributedMapResult<O>> distributedMapAsync(
+            String name,
+            DistributedMapSource<I> source,
+            DistributedMapProcessor processor,
+            int maxConcurrency,
+            TypeToken<O> resultType) {
+        return distributedMapAsync(
+                name,
+                source,
+                processor,
+                maxConcurrency,
+                resultType,
+                DistributedMapConfig.builder().build());
+    }
+
     /**
      * Executes a submitter function and waits for an external callback, blocking until the callback completes.
      *
      * <p>Combines a step (to run the submitter) and a callback (to receive the external result) in a child context. The
      * submitter receives a callback ID that external systems use to report completion.
+     *
+     * <p>If a failed child is replayed without its nested operation details and its original exception cannot be
+     * reconstructed, {@link ChildContextFailedException} carries the stored context failure. The SDK does not guess
+     * whether the missing callback or submitter caused it, and does not rerun the completed child.
      *
      * @param <T> the result type
      * @param name the unique operation name within this context
@@ -624,6 +840,9 @@ public interface DurableContext extends BaseContext {
      * <p>This is the core waitForCallbackAsync implementation. All other waitForCallback/waitForCallbackAsync overloads
      * delegate here. Internally creates a child context containing a callback operation and a step that runs the
      * submitter function.
+     *
+     * <p>Retrieving a failed replay's result can report {@link ChildContextFailedException} when nested operation
+     * details are no longer available and the original exception cannot be reconstructed.
      *
      * @param <T> the result type
      * @param name the unique operation name within this context

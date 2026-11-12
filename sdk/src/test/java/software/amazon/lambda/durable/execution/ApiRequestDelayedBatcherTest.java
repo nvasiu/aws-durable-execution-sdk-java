@@ -4,6 +4,7 @@ package software.amazon.lambda.durable.execution;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -18,11 +19,19 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import software.amazon.lambda.durable.util.ExceptionHelper;
 
 class ApiRequestDelayedBatcherTest {
     private static final Duration SHORT_DELAY = Duration.ofMillis(5);
@@ -191,6 +200,77 @@ class ApiRequestDelayedBatcherTest {
     }
 
     @Test
+    void whenFlushCalled_longDelayedItemsCompletePromptly() throws Exception {
+        var future1 = cut.submit(input, Duration.ofHours(1));
+        var future2 = cut.submit(input, Duration.ofHours(1));
+
+        cut.flush();
+
+        CompletableFuture.allOf(future1, future2).get(1, TimeUnit.SECONDS);
+        verify(doBatchAction).accept(argThat(list -> list.size() == 2));
+        cut.shutdown();
+    }
+
+    @Test
+    @Timeout(10)
+    void whenFlushCalledDuringActiveBatch_queuedBatchesWaitWithoutBlockingFlush() throws Exception {
+        var firstBatchStarted = new CountDownLatch(1);
+        var releaseFirstBatch = new CountDownLatch(1);
+        var executions = new AtomicInteger();
+        var singleItemCut = blockingBatcher(firstBatchStarted, releaseFirstBatch, executions);
+        try {
+            var firstFuture = singleItemCut.submit(input, Duration.ofHours(1));
+            singleItemCut.flush();
+            await(firstBatchStarted);
+            var queuedFuture1 = singleItemCut.submit(input, Duration.ofHours(1));
+            var queuedFuture2 = singleItemCut.submit(input, Duration.ofHours(1));
+            singleItemCut.flush();
+
+            assertFalse(firstFuture.isDone());
+            assertFalse(queuedFuture1.isDone());
+            assertFalse(queuedFuture2.isDone());
+            assertEquals(1, executions.get());
+
+            releaseFirstBatch.countDown();
+            CompletableFuture.allOf(firstFuture, queuedFuture1, queuedFuture2).get(1, TimeUnit.SECONDS);
+            assertEquals(3, executions.get());
+        } finally {
+            releaseFirstBatch.countDown();
+            singleItemCut.shutdown();
+        }
+    }
+
+    @Test
+    @Timeout(10)
+    void whenShutdownCalledDuringActiveBatch_itWaitsForCompletion() throws Exception {
+        var batchStarted = new CountDownLatch(1);
+        var releaseBatch = new CountDownLatch(1);
+        var shutdownStarted = new CountDownLatch(1);
+        var blockingCut = blockingBatcher(batchStarted, releaseBatch, new AtomicInteger());
+        var caller = Executors.newSingleThreadExecutor();
+        try {
+            var future = blockingCut.submit(input, Duration.ofHours(1));
+            blockingCut.flush();
+            await(batchStarted);
+            var shutdown = caller.submit(() -> {
+                shutdownStarted.countDown();
+                blockingCut.shutdown();
+            });
+            await(shutdownStarted);
+            assertThrows(TimeoutException.class, () -> shutdown.get(100, TimeUnit.MILLISECONDS));
+            assertFalse(future.isDone());
+
+            releaseBatch.countDown();
+            shutdown.get(1, TimeUnit.SECONDS);
+            assertTrue(future.isDone());
+        } finally {
+            releaseBatch.countDown();
+            blockingCut.shutdown();
+            caller.shutdownNow();
+        }
+    }
+
+    @Test
     void whenShutdownCalled_pendingItemsAreFlushedImmediately() {
         var future = cut.submit(input, LONG_DELAY);
         assertFalse(future.isDone());
@@ -225,5 +305,136 @@ class ApiRequestDelayedBatcherTest {
         var future2 = cut.submit(input, LONG_DELAY);
         cut.shutdown();
         assertTrue(future2.isDone());
+    }
+
+    @Test
+    void pluginFatalAbortsQueuedDelayedAndFutureRequestsWithoutHangingShutdown() throws Exception {
+        var fatal = new InternalError("plugin callback fatal");
+        var signal = new AtomicReference<Error>();
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var calls = new AtomicInteger();
+        var batcher = new ApiRequestDelayedBatcher<Input>(
+                1,
+                100,
+                value -> 1,
+                batch -> {
+                    calls.incrementAndGet();
+                    entered.countDown();
+                    try {
+                        assertTrue(release.await(2, TimeUnit.SECONDS));
+                    } catch (InterruptedException e) {
+                        throw new AssertionError(e);
+                    }
+                    signal.set(fatal);
+                    throw fatal;
+                },
+                signal::get);
+        var first = batcher.submit(input, Duration.ofDays(1));
+        var queued = batcher.submit(input, Duration.ofDays(1));
+        var shutdown = CompletableFuture.runAsync(batcher::shutdown);
+        try {
+            assertTrue(entered.await(2, TimeUnit.SECONDS));
+            var delayed = batcher.submit(input, Duration.ofDays(1));
+            release.countDown();
+            for (var request : List.of(first, queued, delayed))
+                assertSame(
+                        fatal,
+                        assertThrows(ExecutionException.class, () -> request.get(2, TimeUnit.SECONDS))
+                                .getCause());
+            assertSame(
+                    fatal,
+                    ExceptionHelper.unwrapAsyncFailure(
+                            assertThrows(ExecutionException.class, () -> shutdown.get(2, TimeUnit.SECONDS))));
+            var later = batcher.submit(input, Duration.ZERO);
+            assertSame(
+                    fatal,
+                    assertThrows(ExecutionException.class, () -> later.get(2, TimeUnit.SECONDS))
+                            .getCause());
+            assertEquals(1, calls.get());
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
+    void unreportedFatalKeepsTheLegacyBatchFailureBehavior() throws Exception {
+        var error = new InternalError("not reported by a plugin");
+        var calls = new AtomicInteger();
+        var batcher = new ApiRequestDelayedBatcher<Input>(1, 100, value -> 1, batch -> {
+            if (calls.getAndIncrement() == 0) throw error;
+        });
+        var first = batcher.submit(input, Duration.ZERO);
+        assertSame(
+                error,
+                assertThrows(ExecutionException.class, () -> first.get(2, TimeUnit.SECONDS))
+                        .getCause());
+        batcher.submit(input, Duration.ZERO).get(2, TimeUnit.SECONDS);
+        batcher.shutdown();
+        assertEquals(2, calls.get());
+    }
+
+    @Test
+    @SuppressWarnings("removal")
+    void reportedFatalEscapesItsCheckpointWorker() throws Exception {
+        for (Error fatal : List.of(new InternalError("checkpoint hook"), new ThreadDeath())) {
+            var signal = new AtomicReference<Error>();
+            var uncaught = new AtomicReference<Throwable>();
+            var escaped = new CountDownLatch(1);
+            var batcher = new ApiRequestDelayedBatcher<Input>(
+                    1,
+                    100,
+                    value -> 1,
+                    batch -> {
+                        Thread.currentThread().setUncaughtExceptionHandler((owner, failure) -> {
+                            uncaught.set(failure);
+                            escaped.countDown();
+                        });
+                        signal.set(fatal);
+                        throw fatal;
+                    },
+                    signal::get);
+            var request = batcher.submit(input, Duration.ZERO);
+            assertSame(
+                    fatal,
+                    assertThrows(ExecutionException.class, () -> request.get(2, TimeUnit.SECONDS))
+                            .getCause());
+            assertTrue(escaped.await(2, TimeUnit.SECONDS), "fatal must leave CompletableFuture containment");
+            assertSame(fatal, uncaught.get());
+        }
+    }
+
+    @Test
+    void alreadyReportedPluginFatalPreventsBatchExecution() throws Exception {
+        var fatal = new InternalError("already reported by another hook");
+        var calls = new AtomicInteger();
+        var batcher =
+                new ApiRequestDelayedBatcher<Input>(1, 100, value -> 1, batch -> calls.incrementAndGet(), () -> fatal);
+        var request = batcher.submit(input, Duration.ofMinutes(1));
+        assertSame(
+                fatal,
+                assertThrows(ExecutionException.class, () -> request.get(2, TimeUnit.SECONDS))
+                        .getCause());
+        assertEquals(0, calls.get(), "do not start a backend request after a reported plugin fatal");
+        assertSame(
+                fatal, ExceptionHelper.unwrapAsyncFailure(assertThrows(CompletionException.class, batcher::shutdown)));
+    }
+
+    private ApiRequestDelayedBatcher<Input> blockingBatcher(
+            CountDownLatch started, CountDownLatch release, AtomicInteger executions) {
+        return new ApiRequestDelayedBatcher<>(1, MAX_BATCH_BINARY_SIZE_IN_BYTES, item -> 0, requests -> {
+            executions.incrementAndGet();
+            started.countDown();
+            await(release);
+        });
+    }
+
+    private void await(CountDownLatch latch) {
+        try {
+            assertTrue(latch.await(5, TimeUnit.SECONDS), "Timed out waiting for the test latch");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError(e);
+        }
     }
 }

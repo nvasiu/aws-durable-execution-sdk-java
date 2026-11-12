@@ -9,17 +9,37 @@ import static org.mockito.Mockito.*;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.IntStream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import software.amazon.awssdk.awscore.exception.AwsErrorDetails;
 import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.http.SdkHttpResponse;
 import software.amazon.awssdk.services.lambda.model.CheckpointDurableExecutionResponse;
 import software.amazon.awssdk.services.lambda.model.CheckpointUpdatedExecutionState;
+import software.amazon.awssdk.services.lambda.model.DistributedMapCsvFormatOptions;
+import software.amazon.awssdk.services.lambda.model.DistributedMapInlineSourceConfig;
+import software.amazon.awssdk.services.lambda.model.DistributedMapOptions;
+import software.amazon.awssdk.services.lambda.model.DistributedMapReaderFunctionSourceConfig;
+import software.amazon.awssdk.services.lambda.model.DistributedMapS3ObjectConfig;
+import software.amazon.awssdk.services.lambda.model.DistributedMapS3SourceConfig;
+import software.amazon.awssdk.services.lambda.model.DistributedMapS3SourceType;
+import software.amazon.awssdk.services.lambda.model.DistributedMapSourceConfig;
+import software.amazon.awssdk.services.lambda.model.DistributedMapSourceFormat;
+import software.amazon.awssdk.services.lambda.model.DistributedMapSourceType;
 import software.amazon.awssdk.services.lambda.model.GetDurableExecutionStateResponse;
 import software.amazon.awssdk.services.lambda.model.Operation;
 import software.amazon.awssdk.services.lambda.model.OperationAction;
@@ -76,17 +96,162 @@ class CheckpointManagerTest {
     }
 
     @Test
+    void checkpoint_sendsLargeInlineSourceInItsOwnRequest() throws Exception {
+        // 800 KB of inline items, over the 750 KB batch limit, so this update cannot share a request.
+        var items = Collections.nCopies(800, "x".repeat(1024));
+        var dmapStart = OperationUpdate.builder()
+                .id("op-dmap")
+                .type(OperationType.DISTRIBUTED_MAP)
+                .action(OperationAction.START)
+                .distributedMapOptions(DistributedMapOptions.builder()
+                        .source(DistributedMapSourceConfig.builder()
+                                .type(DistributedMapSourceType.INLINE)
+                                .inlineSourceConfig(DistributedMapInlineSourceConfig.builder()
+                                        .items(items)
+                                        .build())
+                                .build())
+                        .build())
+                .build();
+        var step = OperationUpdate.builder()
+                .id("op-step")
+                .type(OperationType.STEP)
+                .action(OperationAction.START)
+                .build();
+
+        var sent = new ArrayList<List<OperationUpdate>>();
+        when(client.checkpoint(anyString(), anyString(), anyList())).thenAnswer(invocation -> {
+            sent.add(invocation.getArgument(2));
+            return CheckpointDurableExecutionResponse.builder()
+                    .checkpointToken("token-2")
+                    .build();
+        });
+
+        var first = batcher.checkpoint(dmapStart);
+        var second = batcher.checkpoint(step);
+        first.get(500, TimeUnit.MILLISECONDS);
+        second.get(500, TimeUnit.MILLISECONDS);
+
+        assertEquals(2, sent.size(), "the oversized update must not share a request");
+        assertEquals(
+                List.of("op-dmap"),
+                sent.get(0).stream().map(OperationUpdate::id).toList());
+        assertEquals(
+                List.of("op-step"),
+                sent.get(1).stream().map(OperationUpdate::id).toList());
+    }
+
+    @Test
+    void checkpoint_countsCsvHeadersTowardBatchSize() throws Exception {
+        // The step payload fills the 750 KB batch limit to within 15,000 characters. The two updates fit in one
+        // request only if the 30,000 characters of CSV headers are left out of the estimate.
+        var step = OperationUpdate.builder()
+                .id("op-step")
+                .type(OperationType.STEP)
+                .action(OperationAction.START)
+                .payload("x".repeat(750 * 1024 - 243 - 15_000))
+                .build();
+        var headers = IntStream.range(0, 200)
+                .mapToObj(i -> String.format("%03d", i) + "h".repeat(147))
+                .toList();
+        var dmapStart = OperationUpdate.builder()
+                .id("op-dmap")
+                .type(OperationType.DISTRIBUTED_MAP)
+                .action(OperationAction.START)
+                .distributedMapOptions(DistributedMapOptions.builder()
+                        .source(DistributedMapSourceConfig.builder()
+                                .type(DistributedMapSourceType.S3)
+                                .s3SourceConfig(DistributedMapS3SourceConfig.builder()
+                                        .type(DistributedMapS3SourceType.OBJECT)
+                                        .bucket("bucket")
+                                        .objectConfig(DistributedMapS3ObjectConfig.builder()
+                                                .key("data.csv")
+                                                .format(DistributedMapSourceFormat.CSV)
+                                                .csvFormatOptions(DistributedMapCsvFormatOptions.builder()
+                                                        .headers(headers)
+                                                        .build())
+                                                .build())
+                                        .build())
+                                .build())
+                        .build())
+                .build();
+
+        var sent = new ArrayList<List<OperationUpdate>>();
+        when(client.checkpoint(anyString(), anyString(), anyList())).thenAnswer(invocation -> {
+            sent.add(invocation.getArgument(2));
+            return CheckpointDurableExecutionResponse.builder()
+                    .checkpointToken("token-2")
+                    .build();
+        });
+
+        var first = batcher.checkpoint(step);
+        var second = batcher.checkpoint(dmapStart);
+        first.get(500, TimeUnit.MILLISECONDS);
+        second.get(500, TimeUnit.MILLISECONDS);
+
+        assertEquals(2, sent.size(), "the CSV headers must count toward the batch size");
+    }
+
+    @Test
+    void checkpoint_countsReaderInitialStateTowardBatchSize() throws Exception {
+        // The step payload fills the 750 KB batch limit to within 15,000 characters. The two updates fit in one
+        // request only if the reader's 30,000-character initial state is left out of the estimate.
+        var step = OperationUpdate.builder()
+                .id("op-step")
+                .type(OperationType.STEP)
+                .action(OperationAction.START)
+                .payload("x".repeat(750 * 1024 - 243 - 15_000))
+                .build();
+        var dmapStart = OperationUpdate.builder()
+                .id("op-dmap")
+                .type(OperationType.DISTRIBUTED_MAP)
+                .action(OperationAction.START)
+                .distributedMapOptions(DistributedMapOptions.builder()
+                        .source(DistributedMapSourceConfig.builder()
+                                .type(DistributedMapSourceType.READER_FUNCTION)
+                                .readerFunctionSourceConfig(DistributedMapReaderFunctionSourceConfig.builder()
+                                        .functionName("reader")
+                                        .initialState("s".repeat(30_000))
+                                        .build())
+                                .build())
+                        .build())
+                .build();
+
+        var sent = new ArrayList<List<OperationUpdate>>();
+        when(client.checkpoint(anyString(), anyString(), anyList())).thenAnswer(invocation -> {
+            sent.add(invocation.getArgument(2));
+            return CheckpointDurableExecutionResponse.builder()
+                    .checkpointToken("token-2")
+                    .build();
+        });
+
+        var first = batcher.checkpoint(step);
+        var second = batcher.checkpoint(dmapStart);
+        first.get(500, TimeUnit.MILLISECONDS);
+        second.get(500, TimeUnit.MILLISECONDS);
+
+        assertEquals(2, sent.size(), "the reader state must count toward the batch size");
+    }
+
+    @Test
     void checkpoint_skipsApiCallWhenExecutionAlreadyCompleted() throws Exception {
         var finishCheckpointProcessing = mock(Runnable.class);
         var guardedBatcher = new CheckpointManager(
-                config, "arn:test", "token-1", callbackOperations::addAll, () -> false, finishCheckpointProcessing);
+                config,
+                "arn:test",
+                "token-1",
+                callbackOperations::addAll,
+                () -> false,
+                finishCheckpointProcessing,
+                () -> {});
         var update = OperationUpdate.builder()
                 .id("op-1")
                 .type(OperationType.STEP)
                 .action(OperationAction.START)
                 .build();
 
-        guardedBatcher.checkpoint(update).get(200, TimeUnit.MILLISECONDS);
+        var error = assertThrows(
+                Exception.class, () -> guardedBatcher.checkpoint(update).get(200, TimeUnit.MILLISECONDS));
+        assertInstanceOf(SuspendExecutionException.class, error.getCause());
 
         verifyNoInteractions(client);
         verify(finishCheckpointProcessing, never()).run();
@@ -94,29 +259,38 @@ class CheckpointManagerTest {
 
     @Test
     void pollForUpdate_completesWhenOperationReturned() throws Exception {
+        var checkpointStarted = new CountDownLatch(1);
+        var releaseResponse = new CountDownLatch(1);
         var operation = Operation.builder()
                 .id("op-1")
                 .type(OperationType.STEP)
                 .status(OperationStatus.SUCCEEDED)
                 .build();
 
-        when(client.checkpoint(anyString(), anyString(), anyList()))
-                .thenReturn(CheckpointDurableExecutionResponse.builder()
-                        .checkpointToken("token-2")
-                        .newExecutionState(CheckpointUpdatedExecutionState.builder()
-                                .operations(List.of(operation))
-                                .build())
-                        .build());
+        when(client.checkpoint(anyString(), anyString(), anyList())).thenAnswer(ignored -> {
+            checkpointStarted.countDown();
+            releaseResponse.await();
+            return CheckpointDurableExecutionResponse.builder()
+                    .checkpointToken("token-2")
+                    .newExecutionState(CheckpointUpdatedExecutionState.builder()
+                            .operations(List.of(operation))
+                            .build())
+                    .build();
+        });
 
-        var future = batcher.pollForUpdate("op-1");
+        try {
+            var future = batcher.pollForUpdate("op-1");
+            assertTrue(checkpointStarted.await(300, TimeUnit.MILLISECONDS));
+            assertFalse(future.isDone(), "polling stays pending until the backend returns the operation");
+            releaseResponse.countDown();
 
-        assertFalse(future.isDone());
-
-        // Wait for polling to trigger checkpoint
-        var result = future.get(300, TimeUnit.MILLISECONDS);
-
-        assertEquals(operation, result);
-        assertEquals(1, callbackOperations.size());
+            var result = future.get(300, TimeUnit.MILLISECONDS);
+            assertEquals(operation, result);
+            assertEquals(1, callbackOperations.size());
+        } finally {
+            releaseResponse.countDown();
+            batcher.shutdown();
+        }
     }
 
     @Test
@@ -168,6 +342,81 @@ class CheckpointManagerTest {
         assertEquals(operation, result1);
         assertEquals(operation, result2);
         assertEquals(operation, result3);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,true", "true,true", "true,false"})
+    void detachedPollersSettleAfterFirstObserverAborts(boolean earlierPollFailure, boolean abortOnFirst)
+            throws Exception {
+        var operation = Operation.builder()
+                .id("op-1")
+                .type(OperationType.STEP)
+                .status(OperationStatus.SUCCEEDED)
+                .build();
+        var update = OperationUpdate.builder()
+                .id("trigger")
+                .type(OperationType.STEP)
+                .action(OperationAction.START)
+                .build();
+        var fatal = new InternalError("first observer abort");
+        var response = CheckpointDurableExecutionResponse.builder()
+                .checkpointToken("token-2")
+                .newExecutionState(CheckpointUpdatedExecutionState.builder()
+                        .operations(List.of(operation))
+                        .build())
+                .build();
+        var ordinary = new IllegalStateException("ordinary polling transport failure");
+        when(client.checkpoint(anyString(), anyString(), anyList())).thenReturn(response);
+        // Delayed polls are batched with the explicit checkpoint, without a timing-dependent background request.
+        var first = batcher.pollForUpdate("op-1", Instant.now().plusSeconds(60));
+        var second = batcher.pollForUpdate("op-1", Instant.now().plusSeconds(60));
+        try {
+            if (earlierPollFailure) {
+                // An ordinary failed polling request leaves its observation future registered for a later response.
+                // Put the explicit request last, so its failure observes completion of both preceding poll requests.
+                doThrow(ordinary).when(client).checkpoint(anyString(), anyString(), anyList());
+                var failedBatch = batcher.checkpoint(update);
+                assertSame(
+                        ordinary,
+                        assertThrows(ExecutionException.class, () -> failedBatch.get(2, TimeUnit.SECONDS))
+                                .getCause());
+                assertFalse(first.isDone());
+                assertFalse(second.isDone());
+                doReturn(response).when(client).checkpoint(anyString(), anyString(), anyList());
+            }
+            var firstCallback = first.thenAccept(observed -> {
+                assertEquals(operation, observed);
+                if (abortOnFirst) batcher.abortPending(fatal);
+            });
+            var checkpoint = batcher.checkpoint(update);
+            assertEquals(operation, first.get(2, TimeUnit.SECONDS));
+            firstCallback.get(2, TimeUnit.SECONDS);
+            if (abortOnFirst) {
+                assertSame(
+                        fatal,
+                        assertThrows(ExecutionException.class, () -> checkpoint.get(2, TimeUnit.SECONDS))
+                                .getCause());
+                assertSame(
+                        fatal,
+                        assertThrows(ExecutionException.class, () -> second.get(2, TimeUnit.SECONDS))
+                                .getCause());
+                assertEquals(operation, first.join(), "abort must retain an already delivered outcome");
+            } else {
+                checkpoint.get(2, TimeUnit.SECONDS);
+                assertEquals(operation, second.get(2, TimeUnit.SECONDS));
+            }
+            assertEquals(List.of(operation), callbackOperations);
+            verify(client, times(earlierPollFailure ? 2 : 1)).checkpoint(anyString(), anyString(), anyList());
+        } finally {
+            if (abortOnFirst) {
+                assertSame(
+                        fatal,
+                        assertThrows(CompletionException.class, batcher::shutdown)
+                                .getCause());
+            } else {
+                batcher.shutdown();
+            }
+        }
     }
 
     @Test
@@ -662,6 +911,139 @@ class CheckpointManagerTest {
         assertInstanceOf(UnrecoverableDurableExecutionException.class, ex.getCause());
     }
 
+    // --- Checkpoint token revocation tests (a checkpoint response with no checkpoint token) ---
+
+    @Test
+    void checkpointBatch_nonTerminalTokenWithdrawal_suspendsAndRejectsFurtherRequests() {
+        var signalSuspension = mock(Runnable.class);
+        var revocableBatcher = new CheckpointManager(
+                config, "arn:test", "token-1", callbackOperations::addAll, () -> true, () -> {}, signalSuspension);
+        var update = stepUpdate("op-1");
+        when(client.checkpoint(any(), any(), any())).thenReturn(missingTokenResponse(update));
+        var poller = revocableBatcher.pollForUpdate("op-1", Instant.now().plusSeconds(60));
+        try {
+            assertSuspended(revocableBatcher.checkpoint(update));
+            assertSuspended(poller);
+            assertTrue(revocableBatcher.isCheckpointTokenRevoked());
+            verify(signalSuspension).run();
+            assertWithdrawalStopsFurtherRequests(revocableBatcher, update);
+        } finally {
+            revocableBatcher.shutdown();
+        }
+    }
+
+    @Test
+    void checkpointBatch_nonTerminalTokenWithdrawal_publishesRevocationBeforeCompletingPollers() throws Exception {
+        var update = stepUpdate("op-1");
+
+        var poller = batcher.pollForUpdate("op-1", Instant.now().plusSeconds(60));
+        var revocationObservedByPoller = poller.handle((operation, error) -> batcher.isCheckpointTokenRevoked());
+        when(client.checkpoint(any(), any(), any())).thenReturn(missingTokenResponse(update));
+
+        try {
+            assertSuspended(batcher.checkpoint(update));
+            assertSuspended(poller);
+            assertTrue(revocationObservedByPoller.get(1, TimeUnit.SECONDS));
+        } finally {
+            batcher.shutdown();
+        }
+    }
+
+    @Test
+    void checkpointBatch_terminalTokenWithdrawal_completesAndRejectsFurtherRequests() throws Exception {
+        var signalSuspension = mock(Runnable.class);
+        var revocableBatcher = new CheckpointManager(
+                config, "arn:test", "token-1", callbackOperations::addAll, () -> true, () -> {}, signalSuspension);
+        var update = OperationUpdate.builder()
+                .id("exec-op")
+                .type(OperationType.EXECUTION)
+                .action(OperationAction.SUCCEED)
+                .payload("\"result\"")
+                .build();
+        when(client.checkpoint(any(), any(), any())).thenReturn(missingTokenResponse(update));
+        var poller = revocableBatcher.pollForUpdate("exec-op", Instant.now().plusSeconds(60));
+        try {
+            revocableBatcher.checkpoint(update).get(1, TimeUnit.SECONDS);
+            assertSuspended(poller);
+            assertFalse(revocableBatcher.isCheckpointTokenRevoked());
+            verify(signalSuspension, never()).run();
+            assertWithdrawalStopsFurtherRequests(revocableBatcher, update);
+        } finally {
+            revocableBatcher.shutdown();
+        }
+    }
+
+    @Test
+    void shutdown_rejectsLaterPollRegistration() throws Exception {
+        batcher.shutdown();
+
+        var poller = batcher.pollForUpdate("late", Instant.now().plusSeconds(60));
+        assertTrue(poller.isCompletedExceptionally());
+        var error = assertThrows(Exception.class, () -> poller.get(1, TimeUnit.SECONDS));
+        assertInstanceOf(SuspendExecutionException.class, error.getCause());
+        batcher.shutdown();
+        verifyNoInteractions(client);
+    }
+
+    @Test
+    @Timeout(10)
+    void checkpointBatch_revokedToken_flushesLongDelayedCheckpointsAcrossMultipleBatches() throws Exception {
+        var revocationStarted = new CountDownLatch(1);
+        var returnRevokedResponse = new CountDownLatch(1);
+        var delayedConfig = longDelayedConfig();
+        var revocableBatcher = new CheckpointManager(delayedConfig, "arn:test", "token-1", callbackOperations::addAll);
+        revokeAfterRelease(revocationStarted, returnRevokedResponse);
+        try {
+            var poller = revocableBatcher.pollForUpdate("poll", Instant.now());
+            await(revocationStarted);
+            var queued = new ArrayList<CompletableFuture<Void>>();
+            for (int i = 0; i < 401; i++) {
+                queued.add(revocableBatcher.checkpoint(stepUpdate("op-" + i)));
+            }
+            returnRevokedResponse.countDown();
+            assertSuspended(poller);
+            for (var future : queued) {
+                assertSuspended(future);
+            }
+            verify(client, times(1)).checkpoint(anyString(), anyString(), anyList());
+            verify(client, never()).getExecutionState(any(), any(), any());
+        } finally {
+            returnRevokedResponse.countDown();
+            revocableBatcher.shutdown();
+        }
+    }
+
+    @Test
+    @Timeout(10)
+    void checkpoint_withdrawalBetweenTokenCheckAndSubmission_flushesLateRequest() throws Exception {
+        var requestStarted = new CountDownLatch(1);
+        var returnRevokedResponse = new CountDownLatch(1);
+        var submissionPaused = new CountDownLatch(1);
+        var resumeSubmission = new CountDownLatch(1);
+        var delayedConfig = blockedCheckpointConfig(submissionPaused, resumeSubmission);
+        var revocableBatcher = new CheckpointManager(delayedConfig, "arn:test", "token-1", callbackOperations::addAll);
+        var caller = Executors.newSingleThreadExecutor();
+        revokeAfterRelease(requestStarted, returnRevokedResponse);
+        try {
+            var poller = revocableBatcher.pollForUpdate("poll", Instant.now());
+            await(requestStarted);
+            var submission = caller.submit(() -> revocableBatcher.checkpoint(stepUpdate("late")));
+            await(submissionPaused);
+            returnRevokedResponse.countDown();
+            assertSuspended(poller);
+            revocableBatcher.shutdown();
+            resumeSubmission.countDown();
+            assertSuspended(submission.get(1, TimeUnit.SECONDS));
+            verify(client, times(1)).checkpoint(anyString(), anyString(), anyList());
+            verify(client, never()).getExecutionState(any(), any(), any());
+        } finally {
+            returnRevokedResponse.countDown();
+            resumeSubmission.countDown();
+            caller.shutdownNow();
+            revocableBatcher.shutdown();
+        }
+    }
+
     @Test
     void fetchAllPages_nonRetryableError_throwsUnrecoverable() {
         when(client.getExecutionState(eq("arn:test"), eq("token-1"), eq("marker-1")))
@@ -683,5 +1065,80 @@ class CheckpointManagerTest {
                 .build();
 
         assertThrows(UnrecoverableDurableExecutionException.class, () -> batcher.fetchAllPages(state));
+    }
+
+    private CheckpointDurableExecutionResponse missingTokenResponse(OperationUpdate update) {
+        var operation = Operation.builder()
+                .id(update.id())
+                .type(update.type())
+                .status(OperationStatus.SUCCEEDED)
+                .build();
+        return CheckpointDurableExecutionResponse.builder()
+                .newExecutionState(CheckpointUpdatedExecutionState.builder()
+                        .operations(operation)
+                        .nextMarker("unused")
+                        .build())
+                .build();
+    }
+
+    private void assertWithdrawalStopsFurtherRequests(CheckpointManager manager, OperationUpdate update) {
+        assertTrue(callbackOperations.isEmpty());
+        var lateCheckpoint = manager.checkpoint(update);
+        var latePoller = manager.pollForUpdate("late", Instant.now().plusSeconds(60));
+        assertTrue(lateCheckpoint.isCompletedExceptionally());
+        assertTrue(latePoller.isCompletedExceptionally());
+        assertSuspended(lateCheckpoint);
+        assertSuspended(latePoller);
+        verify(client, times(1)).checkpoint(any(), any(), any());
+        verify(client, never()).getExecutionState(any(), any(), any());
+    }
+
+    private DurableConfig longDelayedConfig() {
+        return DurableConfig.builder()
+                .withDurableExecutionClient(client)
+                .withCheckpointDelay(Duration.ofHours(1))
+                .build();
+    }
+
+    private DurableConfig blockedCheckpointConfig(CountDownLatch paused, CountDownLatch resume) {
+        var blockedConfig = spy(longDelayedConfig());
+        doAnswer(invocation -> {
+                    paused.countDown();
+                    await(resume);
+                    return Duration.ofHours(1);
+                })
+                .when(blockedConfig)
+                .getCheckpointDelay();
+        return blockedConfig;
+    }
+
+    private void revokeAfterRelease(CountDownLatch started, CountDownLatch release) {
+        when(client.checkpoint(anyString(), anyString(), anyList())).thenAnswer(invocation -> {
+            started.countDown();
+            await(release);
+            return CheckpointDurableExecutionResponse.builder().build();
+        });
+    }
+
+    private OperationUpdate stepUpdate(String id) {
+        return OperationUpdate.builder()
+                .id(id)
+                .type(OperationType.STEP)
+                .action(OperationAction.START)
+                .build();
+    }
+
+    private void assertSuspended(CompletableFuture<?> future) {
+        var error = assertThrows(Exception.class, () -> future.get(1, TimeUnit.SECONDS));
+        assertInstanceOf(SuspendExecutionException.class, error.getCause());
+    }
+
+    private void await(CountDownLatch latch) {
+        try {
+            assertTrue(latch.await(5, TimeUnit.SECONDS), "Timed out waiting for the test latch");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError(e);
+        }
     }
 }

@@ -7,12 +7,16 @@ import static org.junit.jupiter.api.Assertions.*;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.lambda.durable.config.CompletionConfig;
 import software.amazon.lambda.durable.config.MapConfig;
 import software.amazon.lambda.durable.config.NestingType;
@@ -844,8 +848,10 @@ class MapIntegrationTest {
     @CsvSource({"FLAT, 2", "NESTED, 16"})
     void testMapWithToleratedFailurePercentage(NestingType nestingType, int events) {
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
-            var items = List.of("ok1", "FAIL1", "ok2", "FAIL2", "ok3", "FAIL3", "ok4");
+            // Put the threshold-crossing failure last and serialize admission so exact history counts are stable.
+            var items = List.of("ok1", "ok2", "ok3", "ok4", "FAIL1", "FAIL2", "FAIL3");
             var config = MapConfig.builder()
+                    .maxConcurrency(1)
                     .completionConfig(CompletionConfig.toleratedFailurePercentage(0.3))
                     .nestingType(nestingType)
                     .build();
@@ -876,8 +882,10 @@ class MapIntegrationTest {
         var executionCount = new AtomicInteger(0);
 
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
-            var items = List.of("ok1", "FAIL1", "ok2", "FAIL2", "ok3", "FAIL3", "ok4");
+            // Put the threshold-crossing failure last and serialize admission so exact history counts are stable.
+            var items = List.of("ok1", "ok2", "ok3", "ok4", "FAIL1", "FAIL2", "FAIL3");
             var config = MapConfig.builder()
+                    .maxConcurrency(1)
                     .completionConfig(CompletionConfig.toleratedFailurePercentage(0.3))
                     .nestingType(nestingType)
                     .build();
@@ -901,14 +909,96 @@ class MapIntegrationTest {
         var result1 = runner.runUntilComplete("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result1.getStatus());
         var firstRunCount = executionCount.get();
+        assertEquals(7, firstRunCount);
         assertEquals(events, result1.getHistoryEvents().size());
 
-        // Replay — with unlimited concurrency, children replay simultaneously.
+        // Replay retains the checkpointed completion decision and every previously completed child.
         // Verify completionReason is consistent and no re-execution occurs.
         var result2 = runner.run("test");
         assertEquals(ExecutionStatus.SUCCEEDED, result2.getStatus());
         assertEquals(firstRunCount, executionCount.get(), "Map functions should not re-execute on replay");
         assertEquals(events, result2.getHistoryEvents().size());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"FLAT", "NESTED"})
+    void testDefaultConcurrencyPercentageFailureReplaysStoredResults(NestingType nestingType) {
+        var items = List.of("ok1", "FAIL1", "ok2", "FAIL2", "ok3", "FAIL3", "ok4");
+        var executions = new AtomicIntegerArray(items.size());
+        var runner = percentageReplayRunner(nestingType, items, executions);
+        var resultType = new TypeToken<MapResult<String>>() {};
+
+        var first = runner.runUntilComplete("test");
+        assertEquals(ExecutionStatus.SUCCEEDED, first.getStatus());
+        var stored = first.getResult(resultType);
+        assertPercentageFailureResults(items, stored);
+        for (var index = 0; index < items.size(); index++) assertEquals(1, executions.get(index));
+
+        var replay = runner.run("test");
+        assertEquals(ExecutionStatus.SUCCEEDED, replay.getStatus());
+        assertEquals(stored, replay.getResult(resultType), "Replay returns the exact checkpointed result and errors");
+        assertEquals(first.getHistoryEvents().size(), replay.getHistoryEvents().size());
+        for (var index = 0; index < items.size(); index++) {
+            assertEquals(1, executions.get(index), "Completed child bodies must not repeat on replay");
+        }
+    }
+
+    private static LocalDurableTestRunner<String, MapResult<String>> percentageReplayRunner(
+            NestingType nestingType, List<String> items, AtomicIntegerArray executions) {
+        var allStarted = new CountDownLatch(items.size());
+        return LocalDurableTestRunner.create(
+                String.class,
+                (input, context) -> context.map(
+                        "default-percentage-replay",
+                        items,
+                        String.class,
+                        (item, index, child) -> {
+                            executions.incrementAndGet(index);
+                            allStarted.countDown();
+                            try {
+                                assertTrue(
+                                        allStarted.await(5, TimeUnit.SECONDS),
+                                        "Default concurrency must admit all children");
+                            } catch (InterruptedException error) {
+                                Thread.currentThread().interrupt();
+                                throw new AssertionError(error);
+                            }
+                            if (item.startsWith("FAIL")) throw new IllegalArgumentException("failed: " + item);
+                            return item.toUpperCase();
+                        },
+                        MapConfig.builder()
+                                .completionConfig(CompletionConfig.toleratedFailurePercentage(0.3))
+                                .nestingType(nestingType)
+                                .build()));
+    }
+
+    private static void assertPercentageFailureResults(List<String> inputs, MapResult<String> result) {
+        assertEquals(ConcurrencyCompletionStatus.FAILURE_TOLERANCE_EXCEEDED, result.completionReason());
+        assertEquals(inputs.size(), result.size());
+        assertEquals(3, result.failed().size(), "The third failure crosses the 30 percent threshold");
+        assertTrue(result.failed().size() > inputs.size() * 0.3);
+        for (var index = 0; index < inputs.size(); index++) {
+            var item = result.getItem(index);
+            switch (item.status()) {
+                case SUCCEEDED -> {
+                    assertFalse(inputs.get(index).startsWith("FAIL"));
+                    assertEquals(inputs.get(index).toUpperCase(), item.result());
+                    assertNull(item.error());
+                }
+                case FAILED -> {
+                    assertTrue(inputs.get(index).startsWith("FAIL"));
+                    assertNull(item.result());
+                    assertNotNull(item.error());
+                    assertTrue(item.error().errorMessage().contains("failed: " + inputs.get(index)));
+                }
+                case SKIPPED -> {
+                    // A success racing with the threshold may be absent from the terminal map snapshot.
+                    assertFalse(inputs.get(index).startsWith("FAIL"));
+                    assertNull(item.result());
+                    assertNull(item.error());
+                }
+            }
+        }
     }
 
     @ParameterizedTest
@@ -1756,9 +1846,10 @@ class MapIntegrationTest {
                     words,
                     String.class,
                     (item, index, ctx) -> {
-                        return ctx.step("reverse-" + index, String.class, stepCtx -> new StringBuilder(item)
-                                .reverse()
-                                .toString());
+                        return ctx.step(
+                                "reverse-" + index,
+                                String.class,
+                                stepCtx -> new StringBuilder(item).reverse().toString());
                     },
                     MapConfig.builder().nestingType(nestingType).build());
 
@@ -1951,28 +2042,43 @@ class MapIntegrationTest {
                 attempted.getOperation("after").getId());
     }
 
-    @Test
-    void testChangedItemNameFailsCachedReplay() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testChangedItemNameChecksServiceVisibleChildren(boolean retainChildren) {
         var suffix = new AtomicReference<>("first");
+        var itemCalls = new AtomicInteger();
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var result = context.map(
                     "replay-map",
                     List.of("a", "b"),
                     String.class,
-                    (item, index, ctx) -> item.toUpperCase(),
+                    (item, index, ctx) -> {
+                        itemCalls.incrementAndGet();
+                        return item.toUpperCase().repeat(retainChildren ? 140_000 : 1);
+                    },
                     MapConfig.builder()
                             .itemNamer((item, index) -> item + "-" + suffix.get())
                             .build());
-            return String.join(",", result.results());
+            context.wait("resume-after-map", Duration.ofSeconds(1));
+            return result.results().stream().mapToInt(String::length).sum();
         });
 
-        assertEquals(ExecutionStatus.SUCCEEDED, runner.runUntilComplete("test").getStatus());
+        assertEquals(ExecutionStatus.PENDING, runner.run("test").getStatus());
         suffix.set("second");
+        runner.advanceTime();
 
         var replay = runner.run("test");
 
-        assertEquals(ExecutionStatus.FAILED, replay.getStatus());
-        assertTrue(replay.getError().orElseThrow().errorType().contains("NonDeterministicExecutionException"));
+        if (retainChildren) {
+            assertEquals(ExecutionStatus.FAILED, replay.getStatus());
+            assertTrue(replay.getError().orElseThrow().errorType().contains("NonDeterministicExecutionException"));
+        } else {
+            // The service omits the completed map's children. Their old names cannot be checked from the cached
+            // aggregate alone; this does not relax the caller's requirement to keep names deterministic.
+            assertEquals(ExecutionStatus.SUCCEEDED, replay.getStatus());
+            assertEquals(2, replay.getResult(Integer.class));
+        }
+        assertEquals(2, itemCalls.get(), "Completed item bodies are not repeated");
     }
 
     @Test
@@ -2024,9 +2130,11 @@ class MapIntegrationTest {
         assertTrue(replay.getError().orElseThrow().errorType().contains("NonDeterministicExecutionException"));
     }
 
-    @Test
-    void testRemovingItemNamerFailsCachedReplay() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testRemovingItemNamerChecksServiceVisibleChildren(boolean retainChildren) {
         var useItemNamer = new AtomicBoolean(true);
+        var itemCalls = new AtomicInteger();
         var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
             var configBuilder = MapConfig.builder();
             if (useItemNamer.get()) {
@@ -2036,18 +2144,29 @@ class MapIntegrationTest {
                     "removed-namer-map",
                     List.of("a", "b"),
                     String.class,
-                    (item, index, ctx) -> item.toUpperCase(),
+                    (item, index, ctx) -> {
+                        itemCalls.incrementAndGet();
+                        return item.toUpperCase().repeat(retainChildren ? 140_000 : 1);
+                    },
                     configBuilder.build());
-            return String.join(",", result.results());
+            context.wait("resume-after-map", Duration.ofSeconds(1));
+            return result.results().stream().mapToInt(String::length).sum();
         });
 
-        assertEquals(ExecutionStatus.SUCCEEDED, runner.runUntilComplete("test").getStatus());
+        assertEquals(ExecutionStatus.PENDING, runner.run("test").getStatus());
         useItemNamer.set(false);
+        runner.advanceTime();
 
         var replay = runner.run("test");
 
-        assertEquals(ExecutionStatus.FAILED, replay.getStatus());
-        assertTrue(replay.getError().orElseThrow().errorType().contains("NonDeterministicExecutionException"));
+        if (retainChildren) {
+            assertEquals(ExecutionStatus.FAILED, replay.getStatus());
+            assertTrue(replay.getError().orElseThrow().errorType().contains("NonDeterministicExecutionException"));
+        } else {
+            assertEquals(ExecutionStatus.SUCCEEDED, replay.getStatus());
+            assertEquals(2, replay.getResult(Integer.class));
+        }
+        assertEquals(2, itemCalls.get(), "Completed item bodies are not repeated");
     }
 
     @Test
@@ -2074,4 +2193,30 @@ class MapIntegrationTest {
     }
 
     public record Order(String id) {}
+
+    public record Payload(String value) {}
+
+    @Test
+    void testPojoItemsKeepDeclaredTypeOnFirstExecutionAndReplay() {
+        var runner = LocalDurableTestRunner.create(String.class, (input, context) -> {
+            var result = context.map(
+                    "pojo-map",
+                    List.of("a", "b"),
+                    Payload.class,
+                    (item, index, ctx) -> new Payload(item),
+                    MapConfig.builder().build());
+            Payload first = result.getResult(0);
+            Payload second = result.getResult(1);
+            return first.value() + second.value();
+        });
+
+        var first = runner.runUntilComplete("x");
+        assertEquals(ExecutionStatus.SUCCEEDED, first.getStatus());
+        assertEquals("ab", first.getResult(String.class));
+
+        // Replay of the completed map must return the declared type as well.
+        var replay = runner.run("x");
+        assertEquals(ExecutionStatus.SUCCEEDED, replay.getStatus());
+        assertEquals("ab", replay.getResult(String.class));
+    }
 }
